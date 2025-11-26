@@ -1,0 +1,41 @@
+configurations:
+  center: '5000000000'
+  ifbw: 1000
+  measurements: 1
+  parameter: S21
+  points: 201
+  power: 0
+  span: '2000000000'
+  start_freq: 4000000000
+  stop_freq: 6000000000
+  sweeps: 1
+  update: 0
+fixed_configurations:
+  polarisation_inverted: 0
+  radar_name: C002
+  firmware_version: 'v0.1.5'
+  rf_switch_pin: 23
+influxdb:
+  url: 
+  token: 
+  org: "wavetrax"
+  bucket: "radar-data"
+measurement_status:
+  auto_measurement: 1
+  device_mode: calibration
+  single_measurement: 0
+timer_settings:
+  init_day: 7
+  init_hour: 12
+  init_minute: 58
+  init_month: 4
+  init_second: 0
+  init_year: 2025
+  interval_hour: 0
+  interval_minute: 2
+  interval_second: 0
+  live_updates: 0
+  temp_interval_hour: 0
+  temp_interval_minute: 30
+  temp_interval_second: 0
+  update: 0

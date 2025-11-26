@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Measurement Configuration</title>
+    <style>
+        .header {
+            text-align: center;
+            padding: 5px;
+            /* font-size: 20px; */
+            top: 0;
+            /* border-radius: 8px; */
+            position: fixed; /* Zorgt ervoor dat de header altijd bovenaan blijft */
+            top: 0; /* Plaats de header bovenaan de pagina */
+            left: 0; /* Zorgt ervoor dat de header niet verschuift naar rechts */
+            width: 100%; /* Zorgt ervoor dat de header over de volledige breedte van de pagina wordt uitgerekt */
+            /* z-index: 1000; Zorgt ervoor dat de header boven andere inhoud komt */
+            border-bottom: 3px solid #9e9e9e;
+            /* border-bottom: 3px solid #FF5733; */
+            background-color: #323E4C;
+            /* background-color: #946161; */
+        }
+
+        /* border-bottom: 3px solid #FF5733; */
+        .radar-name {
+            font-size: 24px;
+            font-weight: bold;
+            margin-top: 0px;
+            padding: 0px;
+        }
+        body, h1, form, select, input, button {
+            margin: 0;
+            padding: 0;
+            border: 0;
+            font-family: Arial, sans-serif;
+            max-width: 100%;
+        }
+        body {
+            margin-top: 120px;
+            /* background-color: #f4f4f4; */
+            background-color: #1B2938;
+            color: #333;
+            line-height: 1.6;
+            padding: 20px;
+            /* display: flex; */
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            max-width: 500px;
+            margin: 20px auto;
+            background: #f8f1f1;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(153, 153, 153, 0.589);
+        }
+        p {
+            color: #d1d1d1;
+            /* margin-bottom: 20px; */
+            font-size: 20px;
+            text-align: center;
+            margin: 2px;
+        }
+        h1 {
+            color: #2599BC;
+            margin-bottom: 20px;
+            font-size: 24px;
+            text-align: center;
+        }
+        h2 {
+            color: #f8f8f8;
+            /* margin-bottom: 0px;*/
+            font-size: 40px;
+            text-align: center;
+            margin: 2px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        form input,
+        form select {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+            margin-bottom: 5px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        form label {
+            display: block;
+            width: 100%;
+            margin-bottom: 5px;
+            font-weight: bold;
+            font-size: 14px;
+            /* text-align: left; */
+        }
+        button {
+            background-color: #0056b3;
+            color: #fff;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 10px;
+        }
+        button:hover {
+            background-color: #004494;
+        }
+        #singleButton {
+            background-color: #007d00;     /* Blauwe achtergrond */
+            color: white;                  /* Witte tekst */
+            border: none;                  /* Geen rand */
+            padding: 10px 20px;            /* Wat opvulling */
+            font-size: 16px;
+            border-radius: 5px;            /* Afgeronde hoeken */
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+            /* centreren */
+            display: block;
+            margin: 20px auto; /* auto links en rechts zorgt voor centrering */
+        }
+
+        #singleButton:hover {
+            background-color: #a4e690;     /* Donkerder blauw bij hover */
+        }
+        #deviceModeButton{
+            background-color: #000000;     /* Blauwe achtergrond */
+            /* centreren */
+            display: block;
+            margin: 20px auto; /* auto links en rechts zorgt voor centrering */
+        }
+        #startStopBtn {
+            background-color: #007d00;     /* Blauwe achtergrond */
+            color: white;                  /* Witte tekst */
+            border: none;                  /* Geen rand */
+            padding: 10px 20px;            /* Wat opvulling */
+            font-size: 16px;
+            border-radius: 5px;            /* Afgeronde hoeken */
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+            /* centreren */
+            display: block;
+            margin: 20px auto; /* auto links en rechts zorgt voor centrering */
+        }
+
+        #startStopBtn:hover {
+            background-color: #a4e690;     /* Donkerder blauw bij hover */
+        }
+        #output {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            background-color: #e9ecef;
+            border-bottom: 3px solid #0056b3;
+            padding: 10px 20px;
+            color: #333;
+            text-align: center;
+            z-index: 9999;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+        }
+        #timerBox {
+            margin-top: 20px;
+            font-size: 20px;
+            background-color: #f3f3f3;
+            display: inline-block;
+            width: 100%;
+            margin-bottom: 5px;
+            padding: 8px;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .calibration-mode {
+            background-color: #017701; /* Blauw voor Calibration Mode */
+        }
+        .field-mode {
+            background-color: #ff2323; /* Groen voor Field Mode */
+        }
+        #modeTitle {
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2>WAVETRAX</h2>
+        <!-- <p>WAter and VEgetation Tower RAdar eXperiments for improved climate monitoring</p> -->
+        <div class="radar-name">
+            <p>Dashboard Radar <span id="radar-name-placeholder"></span>{{config.get('fixed_configurations').get('radar_name')}}</p>
+            <p>Firmware: <span id="radar-name-placeholder"></span>{{config.get('fixed_configurations').get('firmware_version')}}</p>
+        </div>
+    </div>
+
+    <div id="modeContainer" class="container calibration-mode">
+        <h1 id="modeTitle">Calibration Mode</h1>
+        <button id="deviceModeButton" onclick="toggleDeviceMode()">Switch to Field Mode</button>
+    </div>
+
+    <div id="output" style="display:none;"></div>
+    <div class="container">
+        <h1>VNA Configuration</h1>
+        <form id="measurementForm">
+            <div class="form-group">
+                <label for="parameter">Measurement Parameter:</label>
+                <select id="parameter" required>
+                    <!-- <option value="S11" disabled>S11</option>
+                    <option value="S12">S12</option>
+                    <option value="S21">S21</option>
+                    <option value="S22" disabled>S22</option> -->
+                    <option value="S11" {% if config.get('configurations').get('parameter') == 'S11' %}selected{% endif %} disabled>S11</option>
+                    <option value="S12" {% if config.get('configurations').get('parameter') == 'S12' %}selected{% endif %}>S12</option>
+                    <option value="S21" {% if config.get('configurations').get('parameter') == 'S21' %}selected{% endif %}>S21</option>
+                    <option value="S22" {% if config.get('configurations').get('parameter') == 'S22' %}selected{% endif %} disabled>S22</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="points">Center (Hz):</label>
+                <input type="number" id="center" min="10" max="10000000000" required value="{{ config.get('configurations').get('center') if config.get('configurations').get('center') is not none else '' }}">
+            </div>
+            <div class="form-group">
+                <label for="points">Span (Hz):</label>
+                <input type="number" id="span" min="10" max="10000000000" required value="{{ config.get('configurations').get('span') if config.get('configurations').get('span') is not none else '' }}">
+            </div>
+            <div class="form-group">
+                <label for="points">Start frequency (Hz):</label>
+                <input type="number" id="start_freq" min="10" max="10000000000" required value="{{ config.get('configurations').get('start_freq') if config.get('configurations').get('start_freq') is not none else '' }}" disabled>
+            </div>
+            <div class="form-group">
+                <label for="points">Stop frequency (Hz):</label>
+                <input type="number" id="stop_freq" min="10" max="10000000000" required value="{{ config.get('configurations').get('stop_freq') if config.get('configurations').get('stop_freq') is not none else '' }}" disabled>
+            </div>
+            <div class="form-group">
+                <label for="power">Power Level (dBm):</label>
+                <input type="number" id="power" min="-30" max="30" required value="{{ config.get('configurations').get('power') if config.get('configurations').get('power') is not none else '' }}">
+            </div>
+            <div class="form-group">
+                <label for="sweeps">Sweeps/Average:</label>
+                <input type="number" id="sweeps" min="1" max="100" required value="{{ config.get('configurations').get('sweeps') if config.get('configurations').get('sweeps') is not none else '' }}">
+            </div>
+            <div class="form-group">
+                <label for="points">Points:</label>
+                <input type="number" id="points" min="10" max="1000" required value="{{ config.get('configurations').get('points') if config.get('configurations').get('points') is not none else '' }}">
+            </div>
+            <div class="form-group">
+                <label for="ifbw">IFBW (Hz):</label>
+                <input type="number" id="ifbw" min="10" max="100000" required value="{{ config.get('configurations').get('ifbw') if config.get('configurations').get('ifbw') is not none else '' }}">
+            </div>
+            <div class="form-group">
+                <label for="measurements">Number of Measurements:</label>
+                <input type="number" id="measurements" min="1" max="1000" required value="{{ config.get('configurations').get('measurements') if config.get('configurations').get('measurements') is not none else '' }}">
+            </div>
+            <button type="button" onclick="submitFullConfig('configurations')">Submit</button>
+        </form>
+    </div>
+
+    <div class="container">
+        <h1>Perform Single Measurement</h1>
+        <!-- <form id="measurementForm"> -->
+            <button id="singleButton" type="button" onclick="startMeasurement()">Single Measurement</button>
+        <!-- </form> -->
+    </div>
+    <div class="container">
+        <h1>Automatic Measurement Control</h1>
+        <form id="autoMeasurementForm">
+            <div class="form-group">
+                <label>Initial Start Date: (YYYY-MM-DD)</label>
+                <div style="display: flex; gap: 5px;">
+                    <input type="number" id="init_year" placeholder="YYYY" min="2020" max="2100" required style="flex:1", required value="{{ config.get('timer_settings').get('init_year') if config.get('timer_settings').get('init_year') is not none else '' }}">
+                    <input type="number" id="init_month" placeholder="MM" min="1" max="12" required style="flex:1", required value="{{ config.get('timer_settings').get('init_month') if config.get('timer_settings').get('init_month') is not none else '' }}">
+                    <input type="number" id="init_day" placeholder="DD" min="1" max="31" required style="flex:1", required value="{{ config.get('timer_settings').get('init_day') if config.get('timer_settings').get('init_day') is not none else '' }}">
+                </div>
+            </div>
+    
+            <div class="form-group">
+                <label>Initial Start Time: [UTC] (HH-MM-SS)</label>
+                <div style="display: flex; gap: 5px;">
+                    <input type="number" id="init_hour" placeholder="Hours" min="0" max="23" required style="flex:1", required value="{{ config.get('timer_settings').get('init_hour') if config.get('timer_settings').get('init_hour') is not none else '' }}">
+                    <input type="number" id="init_minute" placeholder="Minutes" min="0" max="59" required style="flex:1", required value="{{ config.get('timer_settings').get('init_minute') if config.get('timer_settings').get('init_minute') is not none else '' }}">
+                    <input type="number" id="init_second" placeholder="Seconds" min="0" max="59" required style="flex:1", required value="{{ config.get('timer_settings').get('init_second') if config.get('timer_settings').get('init_second') is not none else '' }}">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="timestamp">Interval Between Measurements: (HH-MM-SS)</label>
+                <div style="display: flex; gap: 5px;">
+                    <input type="number" id="interval_hour" placeholder="Hours" min="0" max="23" required style="flex:1", required value="{{ config.get('timer_settings').get('interval_hour') if config.get('timer_settings').get('interval_hour') is not none else '' }}">
+                    <input type="number" id="interval_minute" placeholder="Minutes" min="0" max="59" required style="flex:1", required value="{{ config.get('timer_settings').get('interval_minute') if config.get('timer_settings').get('interval_minute') is not none else '' }}">
+                    <input type="number" id="interval_second" placeholder="Seconds" min="0" max="59" required style="flex:1", required value="{{ config.get('timer_settings').get('interval_second') if config.get('timer_settings').get('interval_minute') is not none else '' }}">
+                </div>
+            </div>
+            <button type="button" onclick="submitFullConfig('timer_settings')">Submit</button>    
+        </form>
+    </div>
+
+    <div class="container">
+        <h1>Automatic Measurements</h1>
+        <!-- <label for="timestamp">Interval Between Measurements: (HH-MM-SS)</label>
+        <div style="display: flex; gap: 5px;"> -->
+            <div id="timerBox" style="display: none;">
+                Next measurement in: <span id="countdown">--:--:--</span>
+            </div>
+        <!-- </div> -->
+        <button id="startStopBtn" onclick="toggleButton()">Enable Auto Measurements</button>
+    </div>
+
+    <div class="container">
+        <h1>Temperature Measurements</h1>
+        <form id="autoMeasurementForm">
+            <div class="form-group">
+                <label for="timestamp">Interval Between Measurements: (HH-MM-SS)</label>
+                <div style="display: flex; gap: 5px;">
+                    <input type="number" id="temp_interval_hour" placeholder="Hours" min="0" max="23" required style="flex:1", required value="{{ config.get('timer_settings').get('temp_interval_hour') if config.get('timer_settings').get('temp_interval_hour') is not none else '' }}">
+                    <input type="number" id="temp_interval_minute" placeholder="Minutes" min="0" max="59" required style="flex:1", required value="{{ config.get('timer_settings').get('temp_interval_minute') if config.get('timer_settings').get('temp_interval_minute') is not none else '' }}">
+                    <input type="number" id="temp_interval_second" placeholder="Seconds" min="0" max="59" required style="flex:1", required value="{{ config.get('timer_settings').get('temp_interval_second') if config.get('timer_settings').get('temp_interval_second') is not none else '' }}">
+                </div>
+            </div>
+            <button type="button" onclick="submitFullConfig('timer_settings')">Submit</button>    
+        </form>
+    </div>
+
+    <script>
+
+        // Variables
+        let singleButtonStatus = false;
+        let status = parseInt("{{ config.get('measurement_status', {}).get('auto_measurement', 0) }}", 10);
+        let autoButtonStatus = (status !== 0);
+        
+        // let currentMode = "calibration";
+        let currentMode = "{{ config.get('measurement_status', {}).get('device_mode', 'calibration') }}";
+
+        // Ophalen van configuratie bij pagina-load
+        window.onload = function () {
+            updateDeviceModeContainerLayout();
+            foo();
+            updateAutoButton(autoButtonStatus);
+        };
+
+        function foo() {
+
+            //  Get last status
+            getCountdownVars();
+
+            //  Check every 1 seconds
+            setTimeout(foo, 1000);
+        }
+
+        // Toggle device mode
+        function toggleDeviceMode() {
+            if (currentMode === "calibration") {
+                const confirmed = confirm("⚠️ The VNA retains its output power settings after reboot.\nThis could damage the VNA!\n\nDo you want to continue?");
+                if (!confirmed) {
+                    return; // Stop verdere uitvoering
+                }
+                currentMode = "field";
+                updateDeviceModeContainerLayout();
+            } else {
+                currentMode = "calibration";
+                updateDeviceModeContainerLayout();
+            }
+
+            sendMode();
+        }
+
+        // Update layout device mode container
+        function updateDeviceModeContainerLayout() {
+            const container = document.getElementById("modeContainer");
+            const title = document.getElementById("modeTitle");
+            const button = document.getElementById("deviceModeButton");
+
+            if (currentMode === "field") {
+                title.textContent = "Field Mode";
+                button.textContent = "Switch to Calibration Mode";
+                container.classList.remove("calibration-mode");
+                container.classList.add("field-mode");
+            }
+
+            if (currentMode === "calibration") {
+                title.textContent = "Calibration Mode";
+                button.textContent = "Switch to Field Mode";
+                container.classList.remove("field-mode");
+                container.classList.add("calibration-mode");
+            }
+
+        }
+
+        // Send device mode --> this can be written more efficiently together with auto_measurement 
+        function sendMode() {
+            const data = {
+                measurement_status: {
+                    device_mode: currentMode
+                }
+            };
+            fetch('/save_config', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data)
+            })
+            .then(response => response.json())
+            .then(result => {
+            })
+            .catch(error => {
+                alert("Error saving config: " + error);
+            });
+        }
+
+
+
+        //  UPDATE FUNCTIONS --> Function to customize header styles based on activity
+        function updateHeader(update) {
+            const header = document.querySelector('.header');
+
+            // Check the activity status
+            if (update === 1) {
+                // If activity is 1, change the header style
+                header.style.borderBottom = "3px solid #FF5733";
+                header.style.backgroundColor = "#946161";
+            } else {
+                // If activity is not 1, change the header style
+                header.style.borderBottom = "3px solid #9e9e9e";
+                header.style.backgroundColor = "#323E4C";
+            }
+        }
+
+        //  UPDATE FUNCTIONS --> Single measurement button color
+        function updateSingleButton(update) {
+            const button = document.getElementById("singleButton");
+
+            if (update === 1) {
+                button.style.backgroundColor = "red"; // Red color
+                button.style.color = "white";
+                singleButtonStatus = true;
+            } else {
+                button.style.backgroundColor = "green"; // Green
+                button.style.color = "white";
+                singleButtonStatus = false;
+            }
+        }
+
+        //  UPDATE FUNCTIONS --> Update countdown timer
+        function updateCountdown(data) {
+            const countdown = document.getElementById("countdown");
+            const timerBox = document.getElementById("timerBox");
+
+            if (data.vna_ch !== undefined && data.vna_cm !== undefined && data.vna_cs !== undefined) {
+                // Toon de timerbox als gegevens beschikbaar zijn
+                timerBox.style.display = "inline-block";
+
+                const hours = String(data.vna_ch).padStart(2, '0');
+                const minutes = String(data.vna_cm).padStart(2, '0');
+                const seconds = String(data.vna_cs).padStart(2, '0');
+
+                countdown.textContent = `${hours}:${minutes}:${seconds}`;
+            } else {
+                timerBox.style.display = "none";  // Verberg als data ontbreekt
+            }
+        }
+        
+        //  UPDATE FUNCTIONS --> Update auto button format
+        function updateAutoButton(update){
+            const btn = document.getElementById("startStopBtn");
+            if (update) {
+                btn.textContent = "Disable Auto Measurements";
+                btn.style.backgroundColor = "red";
+            } else {
+                btn.textContent = "Enable Auto Measurements";
+                btn.style.backgroundColor = "green";
+            }
+        }
+
+        function getCountdownVars(){
+            fetch('/get_countdown_vars')
+                .then(response => response.json())  // Parse de JSON-data
+                .then(data => {
+                    let activity = data.vna_activity;
+                    updateHeader(activity);
+                    updateCountdown(data);
+
+                    if(singleButtonStatus && !activity){
+                        updateSingleButton(0);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching activity:', error);
+                });
+        }
+
+        function startMeasurement() {
+            
+            if(autoButtonStatus){
+                alert("⚠️ Single measurement not allowed. Automatic measurements are in progress at the moment.");
+                return;
+            }
+
+            const data = {
+                measurement_status: {
+                    single_measurement: parseInt(1)
+                }
+            };
+
+            fetch('/save_config', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data)
+            })
+            .then(response => response.json())
+            .then(result => {
+            })
+            .catch(error => {
+                alert("Error saving config: " + error);
+            });
+
+            updateSingleButton(1);
+        }
+
+        function toggleButton() {
+            autoButtonStatus = !autoButtonStatus;
+
+            if (autoButtonStatus) {
+                updateAutoMeasStatus(1);
+            } else {
+                updateAutoMeasStatus(0);
+            }
+
+            updateAutoButton(autoButtonStatus);
+
+        }
+
+        function updateAutoMeasStatus(update) {
+
+            const hour = parseInt(document.getElementById("interval_hour").value);
+            const minute = parseInt(document.getElementById("interval_minute").value);
+            const second = parseInt(document.getElementById("interval_second").value);
+
+            if (hour === 0 && minute === 0 && second === 0) {
+                alert("⚠️ The measurement interval is set to 0. Please set a valid interval.");
+                return;  // Stop de functie hier
+            }
+
+            const data = {
+                measurement_status: {
+                    auto_measurement: parseInt(update)
+                }
+            };
+
+            fetch('/save_config', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data)
+            })
+            .then(response => response.json())
+            .then(result => {
+            })
+            .catch(error => {
+                alert("Error saving config: " + error);
+            });
+        }
+
+        function submitFullConfig(value) {
+            
+            const start_frequency = parseInt(document.getElementById("center").value) - parseInt(document.getElementById("span").value/2);
+            const stop_frequency = parseInt(document.getElementById("center").value) + parseInt(document.getElementById("span").value/2);
+
+            if (start_frequency < 0) {
+                alert("⚠️ The minimum frequency should be higher than 0 Hz.");
+                return;
+            }
+
+            if (stop_frequency > 6000000000) {
+                alert("⚠️ The maximum frequency of the libreVNA is 6 GHz.");
+                return;
+            }
+
+            if (parseInt(document.getElementById("points").value) > 4501) {
+                alert("⚠️ The maximum number of points per sweep is restricted to 4501.");
+                return;
+            }
+
+            if (parseInt(document.getElementById("power").value) > -26) {
+                const confirmed = confirm("⚠️ The output power level is higher than -26 dBm.\nThis could damage the VNA!\n\nDo you want to continue?");
+                if (!confirmed) {
+                    return; // Stop verdere uitvoering
+                }
+            }
+            else {
+                if (parseInt(document.getElementById("power").value) > 0) {
+                    alert("⚠️ The output power level is restricted to 0 dBm.");
+                    return;
+                }
+            }
+
+            if (parseInt(document.getElementById("measurements").value) < 1) {
+                alert("⚠️ The number of measurements must be at least 1.");
+                return;
+            }
+
+            if (autoButtonStatus) {
+                alert("⚠️ Disable automatic measurements first!");
+                return;
+            }
+
+            document.getElementById("start_freq").value = start_frequency;
+            document.getElementById("stop_freq").value = stop_frequency;
+
+            let data = null; 
+            if(value === 'configurations'){
+                data = {
+                    configurations: {
+                        // VNA measurement settings
+                        parameter: document.getElementById("parameter").value,
+                        center: document.getElementById("center").value,
+                        span: document.getElementById("span").value,
+                        start_freq: start_frequency,
+                        stop_freq: stop_frequency,
+                        power: parseFloat(document.getElementById("power").value),
+                        sweeps: parseInt(document.getElementById("sweeps").value),
+                        points: parseInt(document.getElementById("points").value),
+                        ifbw: parseInt(document.getElementById("ifbw").value),
+                        measurements: parseInt(document.getElementById("measurements").value),
+
+                        update: 1
+                    }
+                };
+            }
+            if(value === 'timer_settings'){
+                data = {
+                    timer_settings: {
+                        // Initial time
+                        init_year: parseInt(document.getElementById("init_year").value),
+                        init_month: parseInt(document.getElementById("init_month").value),
+                        init_day: parseInt(document.getElementById("init_day").value),
+                        init_hour: parseInt(document.getElementById("init_hour").value),
+                        init_minute: parseInt(document.getElementById("init_minute").value),
+                        init_second: parseInt(document.getElementById("init_second").value),
+
+                        //  VNA measurement interval
+                        interval_hour: parseInt(document.getElementById("interval_hour").value),
+                        interval_minute: parseInt(document.getElementById("interval_minute").value),
+                        interval_second: parseInt(document.getElementById("interval_second").value),
+
+                        //  Temperature measurement interval
+                        temp_interval_hour: parseInt(document.getElementById("temp_interval_hour").value),
+                        temp_interval_minute: parseInt(document.getElementById("temp_interval_minute").value),
+                        temp_interval_second: parseInt(document.getElementById("temp_interval_second").value),
+
+                        update: 1
+                    }
+                };
+            }
+ 
+            if (data) {
+                fetch('/save_config', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(data)
+                })
+                .then(response => response.json())
+                .then(result => {
+                    const outputDiv = document.getElementById("output");
+                    outputDiv.innerHTML = `<strong>${result.status}:</strong> ${result.message}`;
+                    outputDiv.style.display = "block";
+
+                    setTimeout(() => {
+                    outputDiv.style.display = "none";
+                    }, 5000); // Verdwijn na 5 seconden
+                })
+                .catch(error => {
+                    alert("Error saving config: " + error);
+                });
+            } else {
+                alert("No data prepared to send.");
+            }
+        }
+        
+    </script>
+</body>
+</html>

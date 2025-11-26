@@ -1,0 +1,14 @@
+[Unit]
+Description=Local Dashboard Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/pi/Radar-LibreVNA-Firmware/radar-dashboard/app.py
+WorkingDirectory=/home/pi/Radar-LibreVNA-Firmware/radar-dashboard
+Restart=always
+RestartSec=30
+User=pi
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=multi-user.target
