@@ -53,7 +53,7 @@ PANTILT_DEFAULTS = {
     "min_gap_seconds": 60, "warn_margin_deg": 2.0, "update": 0,
     "step_pan": 0.0, "step_tilt": 0.0, "step_request": 0,
     "move_pan_rel": 0.0, "move_tilt_rel": 0.0, "move_request": 0,
-    "set_home": 0, "clear_fault": 0,
+    "set_home": 0, "clear_fault": 0, "measure_request": 0,
     "run_program": "", "pause_program": 0, "resume_program": 0, "stop_program": 0,
     "heater_config": qpt.HEATER_OFF,
 }
@@ -79,7 +79,7 @@ auto_schedule = {}           # point index -> next due time (unix s), automated 
 live = {
     "pantilt_enabled": 0, "connected": 0, "port": "",
     "pan_rel": 0.0, "tilt_rel": 0.0, "pan_abs": 0.0, "tilt_abs": 0.0,
-    "moving": 0, "fault": "", "retry_in_s": 0,
+    "moving": 0, "measuring": 0, "fault": "", "retry_in_s": 0,
     "program_name": "", "program_type": "", "program_state": "",
     "program_progress": "", "next_measurement_utc": "", "next_measurement_in_s": 0,
     "next_pan_rel": 0.0, "next_tilt_rel": 0.0,
@@ -655,6 +655,19 @@ def process_commands(config):
         move_abs(float(pantilt_cfg.get("home_pan_abs", 0.0)) + float(pantilt_cfg.get("move_pan_rel", 0.0)),
                  float(pantilt_cfg.get("home_tilt_abs", 0.0)) + float(pantilt_cfg.get("move_tilt_rel", 0.0)),
                  pantilt_cfg)
+
+    if pantilt_cfg.get("measure_request", 0) == 1:
+        update_yaml_flag("pantilt", "measure_request", 0)
+        if live["moving"]:
+            set_fault("Cannot measure while moving")
+        else:
+            #   Same blocking primitive a program uses per point (measure_timeout_seconds);
+            #   set_fault/"aborted" handling for a bad outcome already lives inside measure().
+            live["measuring"] = 1
+            result = measure(pantilt_cfg)
+            live["measuring"] = 0
+            if result == "done":
+                print(f"✅ Manual measurement done at pan {live['pan_abs']}° / tilt {live['tilt_abs']}°")
 
 
 def start_program(program_file, config):

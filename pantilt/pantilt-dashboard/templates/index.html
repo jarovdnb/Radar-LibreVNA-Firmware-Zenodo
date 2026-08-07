@@ -112,6 +112,15 @@
         #pantiltToggleBtn:hover {
             background-color: #a4e690;
         }
+        #singleMeasureBtn {
+            background-color: #007d00;
+            color: white;
+            width: 100%;
+            text-align: center;
+        }
+        #singleMeasureBtn:hover {
+            background-color: #006400;
+        }
         #output {
             position: fixed;
             top: 0;
@@ -255,6 +264,9 @@
                 <div></div>
                 <button type="button" onclick="stepPantilt(0, -1)">Tilt &#9660;</button>
                 <div></div>
+            </div>
+            <div class="form-group">
+                <button type="button" id="singleMeasureBtn" onclick="takeSingleMeasurement()">Take Single Measurement</button>
             </div>
             <div class="form-group">
                 <label>Go to relative position (&deg;):</label>
@@ -544,6 +556,19 @@
             document.getElementById("heaterStateLine").textContent =
                 connected ? "Confirmed: " + (heaterNames[data.heater_state] || "unknown") : "";
 
+            //  Single-measurement button: red + disabled while the daemon is
+            //  blocked inside measure() (can take up to measure_timeout_seconds)
+            const measureBtn = document.getElementById("singleMeasureBtn");
+            if (data.measuring === 1) {
+                measureBtn.textContent = "Measuring…";
+                measureBtn.style.backgroundColor = "red";
+                measureBtn.disabled = true;
+            } else {
+                measureBtn.textContent = "Take Single Measurement";
+                measureBtn.style.backgroundColor = "#007d00";
+                measureBtn.disabled = false;
+            }
+
             //  Manual moves/settings and starting a NEW program stay visible but
             //  disabled while either a program is running, or the radar's own
             //  automatic measurements are active: moving the pan-tilt positioner
@@ -664,6 +689,14 @@
 
         function goHomePantilt() {
             postPantilt({ move_pan_rel: 0.0, move_tilt_rel: 0.0, move_request: 1 });
+        }
+
+        //  One VV+VH sweep at the CURRENT pan/tilt position, without a program.
+        //  Same take_single_measurement() the radar dashboard's own button and
+        //  every program point use; card-disabled (program running / radar
+        //  auto_measurement) already blocks this like every other manual command.
+        function takeSingleMeasurement() {
+            postPantilt({ measure_request: 1 });
         }
 
         function movePantiltTo() {
