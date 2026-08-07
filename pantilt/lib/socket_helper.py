@@ -4,11 +4,19 @@ import os
 
 PANTILT_SOCKET_PATH = "/tmp/pantilt_socket.sock"
 
+#   The RADAR app's own liveness socket (controller.py's start_server/
+#   stream_data, ../../lib/socket_helper.py at the repo root -- same path
+#   string, bound only while controller.py's main loop is actually running).
+#   Used by pantilt_config.radar_app_running() to answer "is controller.py
+#   alive", not to read any of its data.
+RADAR_SOCKET_PATH = "/tmp/streaming_socket.sock"
+
 # Unix domain sockets aren't available on every platform (e.g. this Windows
 # Python build) -- fall back to TCP loopback on a fixed port per socket path
 # so the same client/server code works there too.
 TCP_FALLBACK_PORTS = {
     PANTILT_SOCKET_PATH: 8902,
+    RADAR_SOCKET_PATH: 8901,
 }
 
 

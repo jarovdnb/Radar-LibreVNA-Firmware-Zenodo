@@ -29,16 +29,25 @@ described below.
 
 ### The `pantilt_config` bridge
 
-The radar app and this app do not share a config file, a socket, or any Python import. The single
-sanctioned point of contact is three functions in `lib/pantilt_config.py`, which read/write a
-small, fixed set of fields in the *radar* app's config file:
+The radar app and this app do not share a config file or any Python import. The sanctioned point of
+contact is four functions in `lib/pantilt_config.py`: three read/write a small, fixed set of fields
+in the *radar* app's config file, and one checks liveness via controller.py's own status socket
+(read-only, never touches its data):
 
 - `take_single_measurement()` — requests one VV+VH sweep (sets the radar's
   `measurement_status.single_measurement = 1`). Fire-and-forget; poll `get_status()` for
   completion.
-- `get_status()` — read-only snapshot of the radar's state: whether it's reachable, whether it's
-  safe to request a measurement right now (`auto_measurement` off and no measurement already
-  pending), and whether a previously-requested measurement has finished.
+- `get_status()` — read-only snapshot of the radar's state: whether its config.yaml is reachable,
+  whether it's safe to request a measurement right now (`auto_measurement` off and no measurement
+  already pending), and whether a previously-requested measurement has finished. Note `reachable`
+  only means the *file* could be read — true from initial setup onward regardless of whether
+  controller.py has ever run — so it cannot by itself tell "radar app not running" apart from
+  "radar app running but idle"; that's what `radar_app_running()` is for.
+- `radar_app_running()` — connects to controller.py's own liveness socket
+  (`/tmp/streaming_socket.sock`, bound only while its main loop is alive) to answer "is the radar
+  app actually running right now". `measure()` calls this first so a genuinely absent radar app
+  fails in ~1s instead of only surfacing after the full `measure_timeout_seconds` wait (radar's
+  config.yaml existing on disk does not mean anything is alive to service the request).
 - `write_angle(pan, tilt)` — writes the antenna's current relative pan/tilt angle into the radar's
   `antenna_position` section, so `librevna.py` (radar side) can keep embedding it in measurement
   filenames. `write_angle(None, None)` clears it (radar interprets a null `antenna_position` as
@@ -135,7 +144,7 @@ pantilt.py:
   apply_heater_config / apply_positioner_settings
   try_connect / disconnect             serial lifecycle
   wait_move_done / move_abs / settle
-  measure                              pantilt_config.take_single_measurement + get_status polling
+  measure                              radar_app_running fast-fail, then take_single_measurement + get_status polling
   run_point                            per-point retry loop
   clear_program / pause_program / load_active_program / start_program
   run_single_series_tick / run_automated_series_tick

@@ -351,13 +351,27 @@ def settle(pantilt_cfg):
 def measure(pantilt_cfg):
     #   Trigger one VV+VH sweep on the radar app (via pantilt_config) and wait
     #   for completion. Returns "done", "aborted" (module disabled) or
-    #   "fault" (timeout).
+    #   "radar_unreachable" (radar app absent, or didn't finish in time).
+    #   Deliberately NOT "fault": callers treat radar_unreachable as "skip
+    #   this point, keep the schedule going" rather than pausing for a human
+    #   -- an absent radar app is an expected, self-healing field condition,
+    #   unlike an actual positioner fault (which never reaches this function;
+    #   run_point() returns early on those, before measure() is called).
+
+    #   Fail fast if controller.py isn't actually running: radar's config.yaml
+    #   being readable (get_status()["reachable"]) does NOT mean anything is
+    #   alive to service the request -- without this check, the only way to
+    #   discover that is the full measure_timeout_seconds wait below (~7 min
+    #   by default) for a single_measurement flag nothing will ever clear.
+    if not pantilt_config.radar_app_running():
+        set_fault("Radar app is not running/reachable -- skipping this point")
+        return "radar_unreachable"
 
     #   Phase 1 -- wait up to 60s for the radar app to report it's safe to
     #   request. Fails open: if radar's config can't be reached at all,
     #   safe_to_request reads True, so this exits immediately rather than
-    #   blocking on it -- the phase-2 deadline below is what surfaces a
-    #   fault if radar is genuinely unreachable.
+    #   blocking on it -- the phase-2 deadline below is what surfaces
+    #   radar_unreachable if radar is genuinely stuck.
     deadline = time.time() + 60
     status = pantilt_config.get_status()
     while time.time() < deadline and not status["safe_to_request"]:
@@ -377,19 +391,25 @@ def measure(pantilt_cfg):
         #   A transient unreachable blip must not be misread as "done" --
         #   only trust single_measurement_pending == False when reachable.
         if status["reachable"] and not status["single_measurement_pending"]:
+            if live["fault"]:
+                #   A sweep just actually completed, so any radar_unreachable
+                #   fault left over from an earlier point is stale now.
+                set_fault("")
             return "done"
         if retrieve_yaml_file().get("pantilt", {}).get("enabled", 0) == 0:
             #   The running sweep finishes on its own; the daemon stops waiting
             return "aborted"
 
     set_fault(f"Measurement did not complete within {pantilt_cfg.get('measure_timeout_seconds', 400)} s "
-              "(is the radar app running and reachable?)")
-    return "fault"
+              "(is the radar app running and reachable?) -- skipping this point")
+    return "radar_unreachable"
 
 
 def run_point(point, pantilt_cfg, tries):
     #   Move to a program point and measure there, both with retries.
-    #   Returns "done", "aborted" or "fault".
+    #   Returns "done", "aborted", "fault" (move/positioner problem -- from
+    #   move_abs, before measure() is ever reached) or "radar_unreachable"
+    #   (from measure(); see its docstring for why that's kept distinct).
     pan_abs = float(pantilt_cfg.get("home_pan_abs", 0.0)) + float(point["pan_deg"])
     tilt_abs = float(pantilt_cfg.get("home_tilt_abs", 0.0)) + float(point["tilt_deg"])
 
@@ -408,9 +428,9 @@ def run_point(point, pantilt_cfg, tries):
 
     for attempt in range(tries):
         result = measure(pantilt_cfg)
-        if result != "fault":
+        if result not in ("fault", "radar_unreachable"):
             break
-        print(f"⚠️ Measurement attempt {attempt + 1}/{tries} failed")
+        print(f"⚠️ Measurement attempt {attempt + 1}/{tries} failed ({result})")
     return result
 
 
@@ -528,7 +548,10 @@ def run_single_series_tick(config):
 
     result = run_point(prog["points"][index], pantilt_cfg, prog["defaults"]["try"])
 
-    if result == "done":
+    if result == "radar_unreachable":
+        print(f"⚠️ Point {index + 1}: radar unreachable, skipping to the next point")
+
+    if result in ("done", "radar_unreachable"):
         update_yaml_flag("pantilt_status", "program_next_index", index + 1)
         if index + 1 >= len(prog["points"]):
             print("✅ Single series finished")
@@ -572,7 +595,9 @@ def run_automated_series_tick(config):
     result = run_point(point, pantilt_cfg, prog["defaults"]["try"])
     auto_schedule[index] = pantilt_program.next_occurrence(point, int(time.time()), ref_epoch)
 
-    if result == "fault":
+    if result == "radar_unreachable":
+        print(f"⚠️ Point {index + 1}: radar unreachable, will retry at the next scheduled occurrence")
+    elif result == "fault":
         pause_program(live["fault"] or f"Point {index + 1} failed")
 
 

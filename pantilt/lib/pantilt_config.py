@@ -20,6 +20,8 @@ from typing import Optional
 import yaml
 from filelock import FileLock, Timeout
 
+from lib.socket_helper import RADAR_SOCKET_PATH, connect_local_socket
+
 RADAR_CONFIG_PATH = os.environ.get("RADAR_CONFIG_PATH", os.path.expanduser("~") + "/config.yaml")
 RADAR_LOCK_PATH = RADAR_CONFIG_PATH + ".lock"
 
@@ -133,6 +135,34 @@ def get_status() -> dict:
             "single_measurement_pending": False,
             "safe_to_request": True,
         }
+
+
+def radar_app_running(timeout_seconds: float = 1.0) -> bool:
+    """
+    True if controller.py's own liveness socket answers right now.
+
+    This is a DIFFERENT question from get_status()["reachable"]: that only
+    proves radar's config.yaml can be read, which is true from initial setup
+    onward whether or not controller.py has ever run -- it can't tell "app
+    not running" apart from "app running but idle". This connects to
+    controller.py's socket instead (bound only while its main loop is alive),
+    so an absent radar app is detected in ~timeout_seconds instead of only
+    surfacing after measure()'s full measure_timeout_seconds wait for a
+    single_measurement flag nothing will ever clear.
+
+    Never raises; any connection failure (socket file/port absent, connection
+    refused, timeout) means False.
+    """
+    try:
+        client = connect_local_socket(RADAR_SOCKET_PATH)
+        try:
+            client.settimeout(timeout_seconds)
+            return bool(client.recv(1024))
+        finally:
+            client.close()
+    except OSError as e:
+        print(f"⚠️ pantilt_config.radar_app_running: radar app not reachable: {e}")
+        return False
 
 
 def write_angle(pan: Optional[float], tilt: Optional[float]) -> bool:

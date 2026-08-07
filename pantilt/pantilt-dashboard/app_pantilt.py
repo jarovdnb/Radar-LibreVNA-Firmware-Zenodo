@@ -14,8 +14,6 @@ from lib import pantilt_config
 
 # Set username and password
 USERNAME = 'admin'
-# TEMPORARY local-dev override, password: REDACTED_PASSWORD
-# Original hash (restore before deploying): REDACTED_PASSWORD_HASH
 PASSWORD_HASH = "REDACTED_PASSWORD_HASH"
 
 app = Flask(__name__)
