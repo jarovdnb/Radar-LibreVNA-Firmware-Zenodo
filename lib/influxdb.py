@@ -280,6 +280,30 @@ def send_configurations(config, debug_name):
     return True
 
 
+def send_antenna_position(config, debug_name, ts, pan, tilt):
+    client = InfluxDBClient(url=config['influxdb']['url'], token=config['influxdb']['token'], org=config['influxdb']['org'])
+
+    write_api = client.write_api(write_options=SYNCHRONOUS)
+
+    point = (
+        Point("antenna_position")
+        .time(ts)
+        .tag("radar", config['fixed_configurations']['radar_name'])
+        .field("pan", pan)
+        .field("tilt", tilt)
+    )
+
+    try:
+        write_api.write(bucket=config['influxdb']['bucket'], org=config['influxdb']['org'], record=point)
+        debug(debug_name, f"✓ Antenna position sent (pan={pan}, tilt={tilt}).")
+        return True
+    except Exception as e:
+        print(f"[Warning] Could not write antenna position to InfluxDB: {e}")
+        return False
+    finally:
+        client.close()
+
+
 def send_system_info(config, debug_name, temperature_data, system_data):
 
     client = InfluxDBClient(url=config['influxdb']['url'], token=config['influxdb']['token'], org=config['influxdb']['org'])

@@ -19,6 +19,16 @@ from lib.influxdb import *
 from lib.configuration import *
 
 result_dir = os.path.join(os.getcwd(), "results/vna")
+antenna_log_path = os.path.join(os.getcwd(), "pantilt", "antenna_log", "antenna_position.csv")
+
+def log_antenna_position(now, pan, tilt):
+    Path(os.path.dirname(antenna_log_path)).mkdir(parents=True, exist_ok=True)
+    is_new = not os.path.exists(antenna_log_path)
+    with open(antenna_log_path, "a", newline="") as f:
+        writer = csv.writer(f)
+        if is_new:
+            writer.writerow(["timestamp", "pan", "tilt"])
+        writer.writerow([now.strftime("%Y-%m-%d %H:%M:%S"), pan, tilt])
 
 class SocketStreamReader:
     def __init__(self, sock: socket.socket, default_timeout=5):
@@ -256,10 +266,13 @@ class LibreVNA:
 
     def measure(self, filename=None):
 
+        antenna = self.config.get("antenna_position", {})
+        pan, tilt = antenna.get("pan"), antenna.get("tilt")
+
         # |*****************************************|
         # |     ***     Measurement VV      ***     |
         # |*****************************************|
-        
+
         self.debug("Start measurement VV")
 
         # Change RF switch
@@ -276,6 +289,10 @@ class LibreVNA:
             self.last_filename_vv = now.strftime("%Y-%m-%d_%H-%M-%S") + "_dataset_VV"
         else:
             self.last_filename_vv = now.strftime("%Y-%m-%d_%H-%M-%S") + "_" + filename
+
+        if pan is not None and tilt is not None:
+            send_antenna_position(self.config, "[LibreVNA]", now, pan, tilt)
+            log_antenna_position(now, pan, tilt)
 
         self.vna.cmd("VNA:ACQ:SINGLE TRUE")
 
@@ -313,6 +330,10 @@ class LibreVNA:
             self.last_filename_vh = now.strftime("%Y-%m-%d_%H-%M-%S") + "_dataset_VH"
         else:
             self.last_filename_vh = now.strftime("%Y-%m-%d_%H-%M-%S") + "_" + filename
+
+        if pan is not None and tilt is not None:
+            send_antenna_position(self.config, "[LibreVNA]", now, pan, tilt)
+            log_antenna_position(now, pan, tilt)
 
         self.vna.cmd("VNA:ACQ:SINGLE TRUE")
         while self.vna.query("VNA:ACQ:FIN?") == "FALSE":
