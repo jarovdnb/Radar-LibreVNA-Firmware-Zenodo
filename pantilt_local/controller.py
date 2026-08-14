@@ -1,11 +1,11 @@
 #   Local pan-tilt-only controller.
 #
 #   Single-process replacement for the deployed pantilt/pantilt.py daemon:
-#   owns the serial connection to the QPT-50, runs a background loop that
-#   polls status, executes queued commands from the Flask app, and drives
-#   "single" sequence programs. There is no radar: the measurement step of a
-#   sequence is simulated (a short delay with log messages) instead of
-#   triggering a real VNA sweep.
+#   owns the serial connection to the positioner (PTCR-96 protocol, MN00162),
+#   runs a background loop that polls status, executes queued commands from
+#   the Flask app, and drives "single" sequence programs. There is no radar:
+#   the measurement step of a sequence is simulated (a short delay with log
+#   messages) instead of triggering a real VNA sweep.
 
 import os
 import queue
@@ -15,7 +15,7 @@ from datetime import datetime
 
 import yaml
 
-from lib import qpt
+from lib import qpt90
 from lib import pantilt_program
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,7 +23,7 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config", "pantilt_local_config.yaml")
 PROGRAMS_DIR = os.path.join(BASE_DIR, "programs")
 os.makedirs(PROGRAMS_DIR, exist_ok=True)
 
-#   Hard caps (QPT-50 protocol range): configured limits can never exceed these
+#   Hard caps: configured limits can never exceed these
 PAN_ABS_CAP = 180.0
 TILT_ABS_CAP = 90.0
 
@@ -43,7 +43,7 @@ SETTINGS_DEFAULTS = {
     "pan_max_speed": 64, "tilt_max_speed": 64,
     "speed_deg_per_s_estimate": 4.0, "settle_seconds": 2,
     "move_timeout_seconds": 120, "min_gap_seconds": 60, "warn_margin_deg": 2.0,
-    "heater_config": qpt.HEATER_OFF, "simulated_measure_seconds": 1.0,
+    "heater_config": 1, "simulated_measure_seconds": 1.0,   # 1=off (kept for UI compat; qpt90 doesn't apply it -- see apply_heater_config)
 }
 
 
@@ -176,7 +176,7 @@ def set_fault(text):
 def poll_status(cfg):
     try:
         status = driver.get_status()
-    except (qpt.QptError, OSError) as e:
+    except (qpt90.QptError, OSError) as e:
         raise ConnectionLost(str(e))
 
     pan_deg = flip(status.pan_deg, cfg.get("pan_invert", 0) == 1)
@@ -198,36 +198,25 @@ def poll_status(cfg):
 
 
 def apply_heater_config(cfg):
-    desired = int(cfg.get("heater_config", qpt.HEATER_OFF))
-    try:
-        driver.set_heater_config(desired)
-        confirmed = driver.get_heater_config()
-    except (qpt.QptError, OSError) as e:
-        log(f"Heater config could not be applied: {e}")
-        with _lock:
-            live["heater_state"] = 0
-        set_fault(f"Heater config could not be applied: {e}")
-        return False
-
+    #   qpt90 (PTCR-96) doesn't implement heater control yet -- the command's
+    #   data layout (MN00162 Sec 2.9.7) wasn't available when the driver was
+    #   written. Accept the setting so the UI still works, but don't send
+    #   anything to hardware.
     with _lock:
-        live["heater_state"] = confirmed
-    if confirmed != desired:
-        set_fault(f"Heater confirmed in mode {confirmed}, requested mode {desired}")
-        return False
+        live["heater_state"] = 0
     return True
 
 
 def apply_positioner_settings(cfg):
-    driver.set_max_speeds(int(cfg.get("pan_max_speed", 64)), int(cfg.get("tilt_max_speed", 64)))
-    #   Hardware backstop: the unit halts by itself if this process dies
-    driver.set_comm_timeout(2)
+    #   qpt90 doesn't implement max-speed or comm-timeout commands yet (MN00162
+    #   Sec 2.9.8/2.9.10 weren't available when the driver was written).
     apply_heater_config(cfg)
 
 
 def try_connect(cfg):
     global driver, serial_port, connected_port_name
 
-    connected_port_name, driver = qpt.find_qpt(cfg.get("port", ""), int(cfg.get("baud", 9600)))
+    connected_port_name, driver = qpt90.find_qpt90(cfg.get("port", ""), int(cfg.get("baud", 9600)))
     serial_port = driver.ser if driver else None
 
     if driver is None:
@@ -236,7 +225,7 @@ def try_connect(cfg):
     try:
         apply_positioner_settings(cfg)
         poll_status(cfg)
-    except (ConnectionLost, qpt.QptError, OSError) as e:
+    except (ConnectionLost, qpt90.QptError, OSError) as e:
         log(f"Connection lost during setup: {e}")
         disconnect()
         return False
@@ -310,10 +299,10 @@ def move_abs(pan_abs, tilt_abs, cfg):
 
     try:
         driver.move_to(raw_pan, raw_tilt)
-    except qpt.QptNak:
+    except qpt90.QptNak:
         set_fault(f"Positioner rejected move to pan {pan_abs}° / tilt {tilt_abs}°")
         return "fault"
-    except (qpt.QptError, OSError) as e:
+    except (qpt90.QptError, OSError) as e:
         raise ConnectionLost(str(e))
 
     return wait_move_done(cfg)
@@ -591,7 +580,7 @@ def process_commands():
             set_fault("")
 
         elif kind == "set_heater":
-            cfg = update_settings({"heater_config": int(cmd.get("value", qpt.HEATER_OFF))})
+            cfg = update_settings({"heater_config": int(cmd.get("value", 1))})
             apply_heater_config(cfg)
 
         elif kind == "manual_measure":
@@ -631,7 +620,7 @@ def run_forever():
             poll_status(cfg)
             if active_prog is not None:
                 run_program_tick(cfg)
-        except (ConnectionLost, qpt.QptError, OSError) as e:
+        except (ConnectionLost, qpt90.QptError, OSError) as e:
             log(f"Connection lost: {e}")
             disconnect()
             retry_started = time.time()

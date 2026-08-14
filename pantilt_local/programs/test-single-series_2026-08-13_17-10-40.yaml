@@ -1,0 +1,31 @@
+schema_version: 1
+name: test-single-series
+type: single
+defaults:
+  try: 3
+  home_pan_abs: 0.0
+  home_tilt_abs: 0.0
+  pan_orientation: 1
+  tilt_orientation: 1
+points:
+- pan_deg: 5.0
+  tilt_deg: 0.0
+- pan_deg: -5.0
+  tilt_deg: 0.0
+- pan_deg: 0.0
+  tilt_deg: 5.0
+- pan_deg: 0.0
+  tilt_deg: -5.0
+- pan_deg: 0.0
+  tilt_deg: 0.0
+recorded_settings:
+  pan_min_abs: -180.0
+  pan_max_abs: 180.0
+  tilt_min_abs: -90.0
+  tilt_max_abs: 90.0
+  pan_max_speed: 64
+  tilt_max_speed: 64
+  settle_seconds: 2.0
+  move_timeout_seconds: 120.0
+  min_gap_seconds: 60.0
+  heater_config: 1
