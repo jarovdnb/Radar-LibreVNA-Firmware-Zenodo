@@ -1,0 +1,11 @@
+schema_version: 1
+name: test-automated-1min
+type: automated
+initial_startdate_pantilt: '2026-08-14 00:00:00'
+defaults:
+  try: 3
+points:
+  - pan_deg: 12.0
+    tilt_deg: -4.0
+    repeated_minutes: 1
+    offset_sec: 0

@@ -1,6 +1,6 @@
-#   Local pan-tilt-only web app: jog the QPT-50 positioner and run
-#   move-only sequences (measurement is simulated). No radar/LibreVNA code,
-#   no auth -- intended to run on localhost only.
+#   Local pan-tilt-only web app: jog the QPT-90 (PTCR-96) positioner and run
+#   "single" or "automated" sequences (measurement is always simulated). No
+#   radar/LibreVNA code, no auth -- intended to run on localhost only.
 #
 #   Usage:
 #       pip install -r requirements.txt
@@ -82,7 +82,10 @@ def api_measure():
 
 
 #   Sequence ("program") endpoints -- reuses the pantilt_program YAML schema,
-#   single-series only
+#   both "single" (run once) and "automated" (repeating schedule) types.
+#   Measurement is always simulated (see controller.simulate_measurement),
+#   real hardware or not, so an automated sequence here is a schedule/timing
+#   dry run, not a way to run unattended VNA sweeps.
 
 @app.route("/api/program/preview", methods=["POST"])
 def api_program_preview():
@@ -93,10 +96,6 @@ def api_program_preview():
     except pantilt_program.ProgramError as e:
         return jsonify({"status": "error", "message": str(e)})
 
-    if result["summary"]["type"] != "single":
-        result["valid"] = False
-        result.setdefault("home_warnings", []).append(
-            "Only 'single' sequences are supported in the local tool")
     return jsonify(result)
 
 
@@ -110,8 +109,6 @@ def api_program_run():
     except pantilt_program.ProgramError as e:
         return jsonify({"status": "error", "message": str(e)})
 
-    if result["summary"]["type"] != "single":
-        return jsonify({"status": "error", "message": "Only 'single' sequences are supported in the local tool"})
     if not result["valid"]:
         return jsonify({"status": "error", "message": "Sequence is invalid, fix the errors first."})
 

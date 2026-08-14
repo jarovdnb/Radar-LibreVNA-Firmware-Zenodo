@@ -3,15 +3,16 @@
 #   Single-process replacement for the deployed pantilt/pantilt.py daemon:
 #   owns the serial connection to the positioner (PTCR-96 protocol, MN00162),
 #   runs a background loop that polls status, executes queued commands from
-#   the Flask app, and drives "single" sequence programs. There is no radar:
-#   the measurement step of a sequence is simulated (a short delay with log
-#   messages) instead of triggering a real VNA sweep.
+#   the Flask app, and drives sequence programs -- "single" (run once) and
+#   "automated" (repeating schedule). There is no radar: the measurement step
+#   of a sequence is simulated (a short delay with log messages) instead of
+#   triggering a real VNA sweep.
 
 import os
 import queue
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import yaml
 
@@ -66,6 +67,7 @@ next_retry = 0.0
 #   Active sequence (in memory only -- this is a single, short-lived local run)
 active_prog = None
 active_prog_file = ""
+auto_schedule = {}   # point index -> next due time (unix s), automated only
 
 #   State shared with the Flask app; every mutation happens under _lock so
 #   get_live() always returns a consistent snapshot
@@ -73,10 +75,12 @@ live = {
     "connected": 0, "port": "",
     "pan_rel": 0.0, "tilt_rel": 0.0, "pan_abs": 0.0, "tilt_abs": 0.0,
     "moving": 0, "measuring": 0, "fault": "", "retry_in_s": 0,
-    "program_name": "", "program_state": "", "program_progress": "",
+    "program_name": "", "program_type": "", "program_state": "", "program_progress": "",
     "program_paused": 0, "program_next_index": 0,
     "steps_done": 0, "steps_total": 0, "upcoming_points": [],
     "estimated_remaining_s": 0, "heater_state": 0, "log": [],
+    "next_measurement_utc": "", "next_measurement_in_s": 0,
+    "next_pan_rel": 0.0, "next_tilt_rel": 0.0,
 }
 
 
@@ -391,11 +395,13 @@ def run_point(point, cfg, tries):
 #   Sequence ("program") handling -- "single" type only
 
 def clear_program():
-    global active_prog, active_prog_file
+    global active_prog, active_prog_file, auto_schedule
     active_prog = None
     active_prog_file = ""
+    auto_schedule = {}
     with _lock:
         live["program_name"] = ""
+        live["program_type"] = ""
         live["program_state"] = ""
         live["program_progress"] = ""
         live["program_paused"] = 0
@@ -404,6 +410,10 @@ def clear_program():
         live["steps_total"] = 0
         live["upcoming_points"] = []
         live["estimated_remaining_s"] = 0
+        live["next_measurement_utc"] = ""
+        live["next_measurement_in_s"] = 0
+        live["next_pan_rel"] = 0.0
+        live["next_tilt_rel"] = 0.0
 
 
 def pause_program(reason):
@@ -416,7 +426,7 @@ def pause_program(reason):
 
 
 def start_program(program_path, cfg):
-    global active_prog, active_prog_file
+    global active_prog, active_prog_file, auto_schedule
 
     if active_prog is not None:
         set_fault("A sequence is already running -- stop it first")
@@ -429,10 +439,6 @@ def start_program(program_path, cfg):
         set_fault(f"Cannot start sequence '{program_path}': {e}")
         return None
 
-    if prog["type"] != "single":
-        set_fault("Only 'single' sequences are supported in the local tool")
-        return None
-
     #   Apply the program's recorded home position / axis orientation (if
     #   any) before validating against limits
     overrides = pantilt_program.home_orientation_overrides(prog, cfg)
@@ -440,7 +446,8 @@ def start_program(program_path, cfg):
         cfg = update_settings(overrides)
 
     reports = pantilt_program.validate_points(prog, cfg)
-    if any(r["status"] == "error" for r in reports):
+    conflicts = pantilt_program.validate_schedule(prog, cfg)
+    if any(r["status"] == "error" for r in reports) or conflicts:
         set_fault(f"Sequence '{program_path}' is invalid for the current limits/home position")
         return None
 
@@ -449,12 +456,22 @@ def start_program(program_path, cfg):
     active_prog_file = program_path
     with _lock:
         live["program_name"] = os.path.basename(program_path)
+        live["program_type"] = prog["type"]
         live["program_state"] = "running"
         live["program_paused"] = 0
         live["program_next_index"] = 0
         live["steps_total"] = len(prog["points"])
         live["steps_done"] = 0
-    log(f"Sequence started: {os.path.basename(program_path)} ({len(prog['points'])} points)")
+
+    if prog["type"] == "automated":
+        now_s = int(time.time())
+        ref_epoch = prog["initial_startdate_epoch"]
+        auto_schedule = {i: pantilt_program.next_occurrence(p, now_s, ref_epoch) for i, p in enumerate(prog["points"])}
+        log(f"Automated sequence started: {os.path.basename(program_path)} ({len(prog['points'])} scheduled point(s))")
+    else:
+        auto_schedule = {}
+        log(f"Sequence started: {os.path.basename(program_path)} ({len(prog['points'])} points)")
+
     return prog
 
 
@@ -506,6 +523,56 @@ def run_program_tick(cfg):
             log("Sequence finished")
             clear_program()
     elif result == "aborted":
+        clear_program()
+        log("Sequence stopped")
+    elif result == "fault":
+        pause_program(live["fault"] or f"Point {index + 1} failed")
+
+
+def run_automated_series_tick(cfg):
+    #   Fire the earliest due point; between occurrences the loop just idles.
+    #   Ported from pantilt/pantilt.py's run_automated_series_tick, adapted to
+    #   this module's _lock/log()/simulate_measurement() conventions.
+    global auto_schedule
+
+    prog = active_prog
+    with _lock:
+        paused = live["program_paused"] == 1
+    if paused or not auto_schedule:
+        return
+
+    now_s = time.time()
+    index = min(auto_schedule, key=auto_schedule.get)
+    due = auto_schedule[index]
+    point = prog["points"][index]
+
+    with _lock:
+        live["next_measurement_utc"] = datetime.fromtimestamp(due, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        live["next_measurement_in_s"] = max(0, int(due - now_s))
+        live["next_pan_rel"] = point["pan_deg"]
+        live["next_tilt_rel"] = point["tilt_deg"]
+
+    if now_s < due:
+        return
+
+    period = point["repeated_minutes"] * 60
+    lateness = now_s - due
+    ref_epoch = prog["initial_startdate_epoch"]
+
+    if lateness > min(float(cfg.get("min_gap_seconds", 60)), period / 2):
+        #   Too late (previous point overran, paused, ...): skip this occurrence
+        log(f"Skipping point {index + 1}: {int(lateness)} s late")
+        auto_schedule[index] = pantilt_program.next_occurrence(point, int(now_s), ref_epoch)
+        return
+
+    with _lock:
+        live["program_progress"] = f"point {index + 1}/{len(prog['points'])}"
+    log(f"Point {index + 1}/{len(prog['points'])}: moving to pan {point['pan_deg']}° / "
+        f"tilt {point['tilt_deg']}° (relative to home)")
+    result = run_point(point, cfg, prog["defaults"]["try"])
+    auto_schedule[index] = pantilt_program.next_occurrence(point, int(time.time()), ref_epoch)
+
+    if result == "aborted":
         clear_program()
         log("Sequence stopped")
     elif result == "fault":
@@ -642,7 +709,10 @@ def run_forever():
         try:
             poll_status(cfg)
             if active_prog is not None:
-                run_program_tick(cfg)
+                if active_prog["type"] == "single":
+                    run_program_tick(cfg)
+                else:
+                    run_automated_series_tick(cfg)
         except (ConnectionLost, qpt90.QptError, OSError) as e:
             log(f"Connection lost: {e}")
             disconnect()

@@ -503,21 +503,34 @@
 
                 const stepsTable = document.getElementById("upcomingStepsTable");
                 const stepsBody = document.getElementById("upcomingStepsBody");
-                let nextLine = "Finished " + data.steps_done + "/" + data.steps_total + " steps";
-                if (data.estimated_remaining_s) {
-                    nextLine += " — estimated time remaining: " + formatCountdown(data.estimated_remaining_s);
-                }
-                if (data.upcoming_points && data.upcoming_points.length) {
-                    stepsBody.innerHTML = data.upcoming_points.map((p, i) =>
-                        "<tr><td>" + (data.steps_done + i + 1) + "</td><td>" + Number(p.pan_rel).toFixed(1) +
-                        "</td><td>" + Number(p.tilt_rel).toFixed(1) + "</td></tr>"
-                    ).join("");
-                    stepsTable.style.display = "table";
-                } else {
+
+                if (data.program_type === "automated") {
                     stepsTable.style.display = "none";
                     stepsBody.innerHTML = "";
+                    let nextLine = "";
+                    if (data.next_measurement_utc) {
+                        nextLine = "Next: pan " + Number(data.next_pan_rel).toFixed(1) + "°, tilt " +
+                            Number(data.next_tilt_rel).toFixed(1) + "° in " + formatCountdown(data.next_measurement_in_s) +
+                            " (" + data.next_measurement_utc + " UTC)";
+                    }
+                    document.getElementById("programNextLine").textContent = nextLine;
+                } else {
+                    let nextLine = "Finished " + data.steps_done + "/" + data.steps_total + " steps";
+                    if (data.estimated_remaining_s) {
+                        nextLine += " — estimated time remaining: " + formatCountdown(data.estimated_remaining_s);
+                    }
+                    if (data.upcoming_points && data.upcoming_points.length) {
+                        stepsBody.innerHTML = data.upcoming_points.map((p, i) =>
+                            "<tr><td>" + (data.steps_done + i + 1) + "</td><td>" + Number(p.pan_rel).toFixed(1) +
+                            "</td><td>" + Number(p.tilt_rel).toFixed(1) + "</td></tr>"
+                        ).join("");
+                        stepsTable.style.display = "table";
+                    } else {
+                        stepsTable.style.display = "none";
+                        stepsBody.innerHTML = "";
+                    }
+                    document.getElementById("programNextLine").textContent = nextLine;
                 }
-                document.getElementById("programNextLine").textContent = nextLine;
             }
 
             if (data.fault) {
