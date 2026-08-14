@@ -97,8 +97,7 @@ and per-step log messages show up in the Log panel.
 Open `debug_notebook.ipynb` (VS Code or `jupyter notebook`). Run the first
 cell to connect, then run any other cell independently — get status, turn
 pan/tilt ±1°, move to an absolute position, stop, clear faults, get/set
-heater config, set max speeds. Run the last cell to close the connection
-when you're done.
+heater config. Run the last cell to close the connection when you're done.
 
 **`app.py` and the notebook can't use the serial port at the same time** —
 stop one before starting the other.

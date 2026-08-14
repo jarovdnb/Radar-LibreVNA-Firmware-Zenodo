@@ -1,4 +1,4 @@
-#   Pan-tilt daemon (QuickSet QPT-50)
+#   Pan-tilt daemon (MOOG QuickSet QPT-90 / PTCR-96 controller, MN00162 Rev C)
 #
 #   Long-running service modeled on the radar app's controller.py: polls its
 #   OWN config file (~/pantilt_config.yaml) every 100 ms for commands from
@@ -26,10 +26,12 @@ from datetime import datetime, timezone
 from lib.configuration import retrieve_yaml_file, update_yaml_flag, update_yaml_flags, ensure_yaml_section
 from lib.socket_helper import bind_local_socket, close_local_socket
 from lib import pantilt_config
-from lib import qpt
+from lib import qpt90
 from lib import pantilt_program
 
-#   Hard caps (QPT-50 protocol range): the config limits can never exceed these
+#   Hard caps (safety limits, not a PTCR-96 protocol constraint -- some
+#   PTCR-96 platforms support continuous pan rotation): the config limits
+#   can never exceed these
 PAN_ABS_CAP = 180.0
 TILT_ABS_CAP = 90.0
 
@@ -55,7 +57,8 @@ PANTILT_DEFAULTS = {
     "move_pan_rel": 0.0, "move_tilt_rel": 0.0, "move_request": 0,
     "set_home": 0, "clear_fault": 0, "measure_request": 0,
     "run_program": "", "pause_program": 0, "resume_program": 0, "stop_program": 0,
-    "heater_config": qpt.HEATER_OFF,
+    "heater_config": 1,   # 1=off (kept for UI/config compat; qpt90 doesn't
+                          # apply it to hardware -- see apply_heater_config)
 }
 PANTILT_STATUS_DEFAULTS = {
     "connected": 0, "pan_rel": 0.0, "tilt_rel": 0.0, "pan_abs": 0.0, "tilt_abs": 0.0,
@@ -64,7 +67,7 @@ PANTILT_STATUS_DEFAULTS = {
 }
 
 #   Daemon state
-driver = None                # lib.qpt.Qpt instance while connected
+driver = None                # lib.qpt90.Qpt90 instance while connected
 serial_port = None           # the underlying pyserial port
 connected_port_name = ""
 retry_started = 0.0          # start of the current disconnected period
@@ -168,7 +171,7 @@ def poll_status(pantilt_cfg):
     #   Raises ConnectionLost when the serial link is gone.
     try:
         status = driver.get_status()
-    except (qpt.QptError, OSError) as e:
+    except (qpt90.QptError, OSError) as e:
         raise ConnectionLost(str(e))
 
     pan_deg = flip(status.pan_deg, pantilt_cfg.get("pan_invert", 0) == 1)
@@ -202,34 +205,26 @@ def persist_position(pantilt_cfg):
 
 
 def apply_heater_config(pantilt_cfg):
-    #   97H: set the desired mode, then re-query independently to confirm the
-    #   unit actually accepted it (a mismatch means no heater is fitted, or a
-    #   fault prevented the change) rather than trusting only the set's own ACK.
-    desired = int(pantilt_cfg.get("heater_config", qpt.HEATER_OFF))
-    try:
-        driver.set_heater_config(desired)
-        confirmed = driver.get_heater_config()
-    except (qpt.QptError, OSError) as e:
-        print(f"⚠️ Heater config could not be applied: {e}")
-        update_yaml_flag("pantilt_status", "heater_state", 0)
-        live["heater_state"] = 0
-        set_fault(f"Heater config could not be applied: {e}")
-        return False
-
-    update_yaml_flag("pantilt_status", "heater_state", confirmed)
-    live["heater_state"] = confirmed
-
-    if confirmed != desired:
-        set_fault(f"Heater confirmed in mode {confirmed}, requested mode {desired}")
-        return False
-
+    #   The old QPT-50 driver's 97H set/query round-trip (set desired mode,
+    #   re-query to confirm the unit actually accepted it) has no equivalent
+    #   here yet: qpt90 (PTCR-96) doesn't implement heater control -- the
+    #   command's data layout (MN00162 Sec 2.9.7) wasn't available when the
+    #   driver was written. Accept the setting so the dashboard's heater
+    #   dropdown still works and round-trips through config, but don't send
+    #   anything to hardware and don't claim a mode was confirmed.
+    update_yaml_flag("pantilt_status", "heater_state", 0)
+    live["heater_state"] = 0
     return True
 
 
 def apply_positioner_settings(pantilt_cfg):
-    driver.set_max_speeds(int(pantilt_cfg.get("pan_max_speed", 64)), int(pantilt_cfg.get("tilt_max_speed", 64)))
-    #   Hardware backstop: the unit halts by itself if the daemon dies
-    driver.set_comm_timeout(2)
+    #   The old QPT-50 driver also set max speeds (99H) and a comm-timeout
+    #   hardware backstop (96H, unit halts itself if the daemon dies) here.
+    #   qpt90 doesn't implement either command yet (MN00162 Sec 2.9.8/2.9.10
+    #   weren't available when the driver was written) -- pan_max_speed/
+    #   tilt_max_speed are still accepted and recorded in config for later,
+    #   but nothing is sent to hardware, and the comm-timeout safety backstop
+    #   is NOT currently in effect on this positioner.
     apply_heater_config(pantilt_cfg)
 
 
@@ -238,7 +233,7 @@ def try_connect(config):
 
     pantilt_cfg = config.get("pantilt", {})
 
-    connected_port_name, driver = qpt.find_qpt(pantilt_cfg.get("port", ""), int(pantilt_cfg.get("baud", 9600)))
+    connected_port_name, driver = qpt90.find_qpt90(pantilt_cfg.get("port", ""), int(pantilt_cfg.get("baud", 9600)))
     serial_port = driver.ser if driver else None
 
     if driver is None:
@@ -248,7 +243,7 @@ def try_connect(config):
         apply_positioner_settings(pantilt_cfg)
         poll_status(pantilt_cfg)
         persist_position(pantilt_cfg)
-    except (ConnectionLost, qpt.QptError, OSError) as e:
+    except (ConnectionLost, qpt90.QptError, OSError) as e:
         print(f"⚠️ Pan-tilt connection lost during setup: {e}")
         disconnect()
         return False
@@ -331,10 +326,10 @@ def move_abs(pan_abs, tilt_abs, pantilt_cfg):
 
     try:
         driver.move_to(raw_pan, raw_tilt)
-    except qpt.QptNak:
+    except qpt90.QptNak:
         set_fault(f"Positioner rejected move to pan {pan_abs}° / tilt {tilt_abs}°")
         return "fault"
-    except (qpt.QptError, OSError) as e:
+    except (qpt90.QptError, OSError) as e:
         raise ConnectionLost(str(e))
 
     return wait_move_done(pantilt_cfg)
@@ -821,7 +816,7 @@ def main_loop():
                     else:
                         run_automated_series_tick(config)
 
-        except (ConnectionLost, qpt.QptError, OSError) as e:
+        except (ConnectionLost, qpt90.QptError, OSError) as e:
             print(f"❌ Pan-tilt connection lost: {e}")
             disconnect()
             retry_started = time.time()

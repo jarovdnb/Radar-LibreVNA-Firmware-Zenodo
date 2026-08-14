@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-#   Standalone connectivity test: connect to the QPT-50 pan-tilt and print its
-#   status once. Does not touch pantilt_config.yaml or the daemon.
+#   Standalone connectivity test: connect to the QPT-90 (PTCR-96) pan-tilt and
+#   print its status once. Does not touch pantilt_config.yaml or the daemon.
 #
 #   Run from the pantilt/ folder:
 #       python pt_get_ping.py            (auto-scan for the positioner)
@@ -8,7 +8,7 @@
 
 import sys
 
-from lib import qpt
+from lib import qpt90
 from lib.configuration import retrieve_yaml_file
 
 
@@ -23,7 +23,7 @@ def main():
     port_hint, baud = get_port_baud()
     print(f"Connecting (port={port_hint or 'auto-scan'}, baud={baud})...")
 
-    port, dev = qpt.find_qpt(port_hint=port_hint, baud=baud)
+    port, dev = qpt90.find_qpt90(port_hint=port_hint, baud=baud)
     if dev is None:
         print("FAILED: no pan-tilt responded.")
         sys.exit(1)
@@ -31,7 +31,7 @@ def main():
     print(f"Connected on {port}")
     status = dev.get_status()
     print(f"pan={status.pan_deg:.1f} deg  tilt={status.tilt_deg:.1f} deg")
-    print(f"moving={status.moving}  hard_limit={status.hard_limit}  soft_limit={status.soft_limit}  hres={status.hres}")
+    print(f"moving={status.moving}  hard_limit={status.hard_limit}  soft_limit={status.soft_limit}  continuous={status.continuous}")
     print(f"faults: {', '.join(status.faults) if status.faults else 'none'}")
 
     dev.ser.close()

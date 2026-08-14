@@ -43,7 +43,7 @@ SETTINGS_DEFAULTS = {
     "pan_max_speed": 64, "tilt_max_speed": 64,
     "speed_deg_per_s_estimate": 4.0, "settle_seconds": 2,
     "move_timeout_seconds": 120, "min_gap_seconds": 60, "warn_margin_deg": 2.0,
-    "heater_config": 1, "simulated_measure_seconds": 1.0,   # 1=off (kept for UI compat; qpt90 doesn't apply it -- see apply_heater_config)
+    "heater_config": 1, "simulated_measure_seconds": 1.0,   # 1=off in the UI's 1/2/3 convention -- see apply_heater_config
 }
 
 
@@ -198,12 +198,35 @@ def poll_status(cfg):
 
 
 def apply_heater_config(cfg):
-    #   qpt90 (PTCR-96) doesn't implement heater control yet -- the command's
-    #   data layout (MN00162 Sec 2.9.7) wasn't available when the driver was
-    #   written. Accept the setting so the UI still works, but don't send
-    #   anything to hardware.
+    #   97H: set the desired mode, then re-query independently to confirm the
+    #   unit actually accepted it (a mismatch means no heater is fitted, or a
+    #   fault prevented the change) rather than trusting only the set's own ACK.
+    #
+    #   The UI/config heater_config field is 1=Off/2=Share/3=Full (unchanged
+    #   convention, shared with the old removed driver's byte values), but
+    #   qpt90's actual wire format (MN00162 Sec 2.9.7) is 0=No Heat/1=Share/
+    #   2=Full Heat with a separate Query bit -- translate by -1/+1 at this
+    #   boundary and keep the UI-facing 1/2/3 convention everywhere else.
+    desired_ui = int(cfg.get("heater_config", 1))
+    desired = max(qpt90.HEATER_OFF, min(qpt90.HEATER_FULL, desired_ui - 1))
+    try:
+        driver.set_heater_config(desired)
+        confirmed = driver.get_heater_config()
+    except (qpt90.QptError, OSError) as e:
+        log(f"Heater config could not be applied: {e}")
+        with _lock:
+            live["heater_state"] = 0
+        set_fault(f"Heater config could not be applied: {e}")
+        return False
+
+    confirmed_ui = confirmed + 1
     with _lock:
-        live["heater_state"] = 0
+        live["heater_state"] = confirmed_ui
+
+    if confirmed != desired:
+        set_fault(f"Heater confirmed in mode {confirmed_ui}, requested mode {desired_ui}")
+        return False
+
     return True
 
 

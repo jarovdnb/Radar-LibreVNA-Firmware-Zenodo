@@ -1,18 +1,19 @@
 #   MOOG QuickSet PTCR-96 embedded controller protocol driver (MN00162 Rev C).
 #   Covers the Q90 (and other PTCR-96-based platforms: QPT50/90/200/500,
-#   QMP/QMP-R) -- NOT the same wire format as lib/qpt.py, which targets an
-#   older/different protocol revision. Key differences from qpt.py:
+#   QMP/QMP-R) -- NOT the same wire format as the old lib/qpt.py, which
+#   targeted an older/different protocol revision (removed once this app
+#   moved to a PTCR-96/QPT-90 unit). Key differences from that old driver:
 #     - Frames carry an Identity byte (STX, Identity, Cmd, Data, LRC, ETX);
 #       the LRC covers Identity..last data byte, not just Cmd..data.
 #     - Pan/tilt coordinates are 24-bit (3-byte) signed little-endian,
 #       scaled x100 (0.01 deg), not 16-bit x10.
 #     - The 31H status/jog command carries jog fields for two camera ports
 #       (7 data bytes), not one.
-#   Camera/lens/preset-table/tour commands (60H-75H, 32H, 40H-56H) and some
+#   Camera/lens/preset-table/tour commands (60H-75H, 32H, 40H-56H) and the
 #   setup commands whose exact data layout wasn't available when this was
-#   written (max speed 9CH, comm timeout 96H, identity 9FH) are intentionally
-#   not implemented -- add them once their byte layout (MN00162 sections 2.6,
-#   2.9.8, 2.9.10, 2.9.14) is on hand. Heater (97H, Sec 2.9.7) IS implemented.
+#   written (heater 97H, max speed 9CH, comm timeout 96H, identity 9FH) are
+#   intentionally not implemented -- add them once their byte layout (MN00162
+#   sections 2.6, 2.9.7, 2.9.8, 2.9.10, 2.9.14) is on hand.
 #
 #   Frame:   STX  Identity  Cmd  [data...]  LRC  ETX     (host -> PTCR)
 #            ACK  Identity  Cmd  [data...]  LRC  ETX     (PTCR -> host, NAK on error)
@@ -20,6 +21,7 @@
 #   Escape:  any data/LRC byte equal to a control char is sent as ESC, byte|0x80
 #   Ints:    24-bit signed little-endian, angle x100 (0.01 degree)
 
+import glob
 import time
 
 #   Control characters
@@ -39,7 +41,6 @@ CMD_MOVE_ABS   = 0x33   # move to entered (absolute) coordinates
 CMD_MOVE_DELTA = 0x34   # move to delta (relative) coordinates
 CMD_MOVE_ZERO  = 0x35   # move to absolute 0/0
 CMD_MOVE_HOME  = 0x36   # move to home (preset 31)
-CMD_HEATER     = 0x97   # get/set heater configuration
 
 #   31H command bitset bits (Sec 2.2)
 BIT_RES  = 0x01   # reset latched faults
@@ -52,15 +53,6 @@ BIT_PDIR = 0x80   # pan jog direction: 1 = CW, 0 = CCW
 
 #   "Move To Entered Coordinates" sentinel: leave this axis where it is
 NO_MOVE_DEG = 999.99
-
-#   97H Config byte (Sec 2.9.7): bit 7 = Query (1 = read the current mode
-#   without changing it; only valid in a request). Bits 6-0 = mode -- in a
-#   Query=0 request this is the desired mode, in any response (which always
-#   has bit 7 = 0) this is the mode actually in effect.
-HEATER_QUERY_BIT = 0x80
-HEATER_OFF   = 0   # "No Heat" -- heater disabled, reduces overall current draw
-HEATER_SHARE = 1   # heater cycles off while the axis motors are moving (caps peak current)
-HEATER_FULL  = 2   # heater runs concurrently with motor operation
 
 
 class QptError(Exception):
@@ -296,25 +288,6 @@ class Qpt90:
     def clear_faults(self):
         return self.get_status(res=True)
 
-    def get_heater_config(self):
-        #   97H with the Query bit set: reads the current mode without changing it
-        data = self.transact(CMD_HEATER, bytes([HEATER_QUERY_BIT]))
-        if not data:
-            raise QptFrameError("Heater query response was empty")
-        return data[0] & 0x7F
-
-    def set_heater_config(self, config):
-        #   97H with the Query bit clear: 0=No Heat, 1=Share (off while
-        #   moving), 2=Full Heat (concurrent with motion). The unit echoes
-        #   back the mode it actually accepted; a mismatch means the request
-        #   was not honored (e.g. no heater fitted on this unit).
-        if config not in (HEATER_OFF, HEATER_SHARE, HEATER_FULL):
-            raise ValueError(f"heater config must be {HEATER_OFF}, {HEATER_SHARE} or {HEATER_FULL}")
-        data = self.transact(CMD_HEATER, bytes([config & 0x7F]))
-        if not data:
-            raise QptFrameError("Heater set response was empty")
-        return data[0] & 0x7F
-
 
 def open_serial(port, baud):
     #   Imported here, not at module level, so importing this module (e.g. for
@@ -338,16 +311,12 @@ def connect(ser, identity=BROADCAST_IDENTITY, attempts=20):
     return None
 
 
-def list_candidate_ports():
-    #   Cross-platform port discovery (Windows COM ports, Linux /dev/tty*,
-    #   macOS /dev/cu.*) via pyserial's own device listing.
-    from serial.tools import list_ports
-    return sorted(p.device for p in list_ports.comports())
-
-
 def find_qpt90(port_hint="", baud=9600, identity=BROADCAST_IDENTITY):
-    #   Try the configured port first, otherwise probe every detected serial port
-    candidates = [port_hint] if port_hint else list_candidate_ports()
+    #   Try the configured port first, otherwise scan the usual USB serial devices
+    if port_hint:
+        candidates = [port_hint]
+    else:
+        candidates = sorted(glob.glob("/dev/serial/by-id/*")) + sorted(glob.glob("/dev/ttyUSB*"))
 
     for port in candidates:
         ser = None
@@ -358,7 +327,7 @@ def find_qpt90(port_hint="", baud=9600, identity=BROADCAST_IDENTITY):
                 return port, qpt
             ser.close()
         except Exception as e:
-            print(f"Could not probe {port}: {e}")
+            print(f"⚠️ Could not probe {port}: {e}")
             if ser is not None:
                 ser.close()
 

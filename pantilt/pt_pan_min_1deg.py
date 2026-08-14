@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-#   Standalone motion test: move the pan axis -1 deg (relative) and report the
-#   new position. Does not touch pantilt_config.yaml or the daemon.
+#   Standalone motion test (QPT-90 / PTCR-96): move the pan axis -1 deg
+#   (relative) and report the new position. Does not touch pantilt_config.yaml
+#   or the daemon.
 #
 #   Run from the pantilt/ folder:
 #       python pt_pan_min_1deg.py            (auto-scan for the positioner)
@@ -9,7 +10,7 @@
 import sys
 import time
 
-from lib import qpt
+from lib import qpt90
 from lib.configuration import retrieve_yaml_file
 
 DELTA_DEG = -1.0
@@ -27,7 +28,7 @@ def main():
     port_hint, baud = get_port_baud()
     print(f"Connecting (port={port_hint or 'auto-scan'}, baud={baud})...")
 
-    port, dev = qpt.find_qpt(port_hint=port_hint, baud=baud)
+    port, dev = qpt90.find_qpt90(port_hint=port_hint, baud=baud)
     if dev is None:
         print("FAILED: no pan-tilt responded.")
         sys.exit(1)

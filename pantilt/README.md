@@ -1,21 +1,29 @@
 # Pan-tilt app
 
-Aims the radar with a QuickSet QPT-50 pan-tilt positioner before each measurement. This is a
-standalone app, independent of the radar app (`../`, originally by Jarne Van Mulders) that owns
-the LibreVNA. The two apps run as separate processes with their own config files, own dashboard
-and own systemd units; the only coupling between them is the small `lib/pantilt_config.py` bridge
-described below.
+Aims the radar with a MOOG QuickSet QPT-90 pan-tilt positioner (PTCR-96 embedded controller,
+MN00162 Rev C) before each measurement. This is a standalone app, independent of the radar app
+(`../`, originally by Jarne Van Mulders) that owns the LibreVNA. The two apps run as separate
+processes with their own config files, own dashboard and own systemd units; the only coupling
+between them is the small `lib/pantilt_config.py` bridge described below.
+
+> This app previously targeted an older QPT-50 unit on a different controller/protocol revision
+> (MN00056 Rev J, `lib/qpt.py`, now removed). If you're looking at deployed hardware and unsure
+> which controller it has, check the label on the positioner's control box — PTCR-96-based units
+> (QPT50/90/200/500, QMP/QMP-R) all speak the protocol in `lib/qpt90.py`.
 
 ## Architecture
 
 - `pantilt.py` — the daemon (own process, own systemd unit, own Unix socket at
-  `/tmp/pantilt_socket.sock`). Owns the serial port to the QPT-50, executes measurement programs,
+  `/tmp/pantilt_socket.sock`). Owns the serial port to the QPT-90, executes measurement programs,
   and polls this app's own config file every 100 ms for commands from `pantilt-dashboard/app_pantilt.py`.
 - `pantilt-dashboard/app_pantilt.py` + `pantilt-dashboard/templates/index.html` — a small Flask
   dashboard (HTTP basic auth, same stack as the radar dashboard) for enabling the module,
   jogging/calibrating, and uploading/running measurement programs.
-- `lib/qpt.py` — pure QPT-50 wire-protocol driver ("Integrated Controller Protocol", MN00056 Rev
-  J). No config or radar knowledge at all.
+- `lib/qpt90.py` — pure PTCR-96 wire-protocol driver ("Embedded Controller Protocol", MN00162 Rev
+  C, covers QPT50/90/200/500 and QMP/QMP-R). No config or radar knowledge at all. Camera/lens/
+  preset-table/tour commands and the heater/max-speed/comm-timeout setup commands are not
+  implemented (their exact data layout wasn't available when the driver was written — see the
+  module's header comment and "Cross-cutting concerns" below).
 - `lib/pantilt_program.py` — YAML measurement-program parsing, validation and scheduling. Takes a
   plain `pantilt_cfg` dict; no config.yaml I/O of its own.
 - `lib/configuration.py` — this app's own config read/write helpers (`retrieve_yaml_file`,
@@ -93,14 +101,14 @@ There is no `mock` mode: `pantilt.py` always talks to real positioner hardware.
 
 1. Make sure user `pi` can open serial ports: `sudo usermod -a -G dialout pi` (logout/login
    afterwards).
-2. Connect the QPT-50 controller via the USB RS-232 adapter; `pantilt.py` scans
+2. Connect the QPT-90 (PTCR-96) controller via the USB RS-232 adapter; `pantilt.py` scans
    `/dev/serial/by-id/*` and `/dev/ttyUSB*` automatically.
 3. Optional: give the adapter a fixed name with a udev rule
    (`sudo nano /etc/udev/rules.d/52-qpt.rules`), filling in the vendor/product id from `lsusb`:
    ```
-   SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SYMLINK+="qpt50", MODE:="0666"
+   SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SYMLINK+="qpt90", MODE:="0666"
    ```
-   and set `/dev/qpt50` as the serial port in the dashboard's pan-tilt settings.
+   and set `/dev/qpt90` as the serial port in the dashboard's pan-tilt settings.
 4. Copy this folder's `config.yaml` template to `~/pantilt_config.yaml` and fill in the real
    serial port / limits / home position for your setup:
    ```
@@ -124,17 +132,17 @@ There is no `mock` mode: `pantilt.py` always talks to real positioner hardware.
    works fully standalone regardless of whether this app is running at all.
 7. Protocol/driver + program-engine unit tests (no hardware needed):
    ```
-   python3 tests/test_qpt_frames.py
+   python3 tests/test_qpt90_frames.py
    python3 tests/test_pantilt_program.py
    ```
 
 ## Internal structure
 
 ```
-lib/qpt.py             STX…ETX framing, escaping/LRC, Qpt driver class, port discovery (find_qpt)
-lib/pantilt_program.py load_program, validate_points/validate_schedule, scheduling math, preview()
-lib/configuration.py   this app's own config.yaml I/O (PyYAML + filelock)
-lib/pantilt_config.py  the only bridge into the radar app's config.yaml (see above)
+lib/qpt90.py             STX…ETX framing, escaping/LRC, Qpt90 driver class, port discovery (find_qpt90)
+lib/pantilt_program.py  load_program, validate_points/validate_schedule, scheduling math, preview()
+lib/configuration.py    this app's own config.yaml I/O (PyYAML + filelock)
+lib/pantilt_config.py   the only bridge into the radar app's config.yaml (see above)
 
 pantilt.py:
   stream_data / start_server           Unix socket server (/tmp/pantilt_socket.sock)
@@ -172,3 +180,11 @@ pantilt.py:
   `pan_orientation`/`tilt_orientation` are optional and independently specifiable. Undeclared ones
   are backfilled from the live config on first run (never overwritten later); declared ones are
   applied to the live pan-tilt config *before* validation when the program starts.
+- **Heater / max-speed / comm-timeout are UI-only right now**: the dashboard's heater dropdown and
+  `pan_max_speed`/`tilt_max_speed` fields still exist and round-trip through config (and into a
+  saved program's `recorded_settings`), but `apply_heater_config`/`apply_positioner_settings` in
+  `pantilt.py` don't send anything to the positioner for them — `lib/qpt90.py` doesn't implement
+  the 97H/99H/96H commands yet (their MN00162 byte layout wasn't available when the driver was
+  written). Notably this also means the QPT-50 driver's comm-timeout hardware backstop (positioner
+  halts itself if the daemon dies) is **not currently in effect**. Add these to `lib/qpt90.py` once
+  their layout is confirmed, then wire them back up here.
