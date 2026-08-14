@@ -81,6 +81,14 @@ def api_measure():
     return jsonify({"status": "success"})
 
 
+@app.route("/api/keepout/profiles", methods=["GET"])
+def api_keepout_profiles():
+    #   Profile files are written offline by debug_notebook.ipynb (Cells
+    #   18-20), one per instrument/mount -- this just lists what's on disk
+    #   so the dashboard can offer them in a dropdown.
+    return jsonify(controller.list_keepout_profiles())
+
+
 #   Sequence ("program") endpoints -- reuses the pantilt_program YAML schema,
 #   both "single" (run once) and "automated" (repeating schedule) types.
 #   Measurement is always simulated (see controller.simulate_measurement),

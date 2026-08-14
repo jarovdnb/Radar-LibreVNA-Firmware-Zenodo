@@ -346,6 +346,13 @@
                     </select>
                     <div id="heaterStateLine" class="grey-note"></div>
                 </div>
+                <div class="form-group">
+                    <label for="keepout_profile">Keep-out profile (antenna/mount geometry):</label>
+                    <select id="keepout_profile">
+                        <option value="">-- none (unrestricted) --</option>
+                    </select>
+                    <div id="keepoutStateLine" class="grey-note"></div>
+                </div>
                 <button type="button" onclick="submitSettings()">Submit</button>
             </form>
         </details>
@@ -406,7 +413,7 @@
         };
 
         window.onload = function () {
-            refreshSettings();
+            refreshKeepoutProfiles().then(refreshSettings);
             pollStatus();
             refreshProgramDropdown();
         };
@@ -477,6 +484,10 @@
             const heaterNames = {1: "Off", 2: "Sharing power with motors", 3: "Full heat"};
             document.getElementById("heaterStateLine").textContent =
                 connected ? "Confirmed: " + (heaterNames[data.heater_state] || "unknown") : "";
+
+            document.getElementById("keepoutStateLine").textContent = data.keepout_profile
+                ? data.keepout_breakpoints + " breakpoint(s) loaded"
+                : "No profile selected — moves are unrestricted by antenna geometry";
 
             const measureBtn = document.getElementById("measureBtn");
             if (data.measuring === 1) {
@@ -589,9 +600,23 @@
                     document.getElementById("port").value = data.port;
                     document.getElementById("baud").value = data.baud;
                     document.getElementById("heater_config").value = data.heater_config;
+                    document.getElementById("keepout_profile").value = data.keepout_profile || "";
                     updateRelLimitsLine();
                 })
                 .catch(error => console.error('Error refreshing settings:', error));
+        }
+
+        function refreshKeepoutProfiles() {
+            return fetch('/api/keepout/profiles')
+                .then(response => response.json())
+                .then(profiles => {
+                    const select = document.getElementById("keepout_profile");
+                    const current = select.value;
+                    select.innerHTML = '<option value="">-- none (unrestricted) --</option>' +
+                        profiles.map(p => "<option value='" + escapeHtml(p) + "'>" + escapeHtml(p) + "</option>").join("");
+                    select.value = current;
+                })
+                .catch(() => {});
         }
 
         function jog(panSign, tiltSign) {
@@ -689,7 +714,8 @@
                 move_timeout_seconds: parseInt(document.getElementById("move_timeout_seconds").value),
                 port: document.getElementById("port").value,
                 baud: parseInt(document.getElementById("baud").value),
-                heater_config: parseInt(document.getElementById("heater_config").value)
+                heater_config: parseInt(document.getElementById("heater_config").value),
+                keepout_profile: document.getElementById("keepout_profile").value
             };
 
             fetch('/api/settings', {

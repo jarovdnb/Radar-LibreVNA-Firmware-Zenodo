@@ -8,11 +8,13 @@
 #       scaled x100 (0.01 deg), not 16-bit x10.
 #     - The 31H status/jog command carries jog fields for two camera ports
 #       (7 data bytes), not one.
-#   Camera/lens/preset-table/tour commands (60H-75H, 32H, 40H-56H) and some
-#   setup commands whose exact data layout wasn't available when this was
-#   written (max speed 9CH, comm timeout 96H, identity 9FH) are intentionally
-#   not implemented -- add them once their byte layout (MN00162 sections 2.6,
-#   2.9.8, 2.9.10, 2.9.14) is on hand. Heater (97H, Sec 2.9.7) IS implemented.
+#   Camera/lens/preset-table/tour/OSD/angle-correction/soft-limit commands
+#   (60H-75H, 32H, 37H, 40H-56H, 80H-85H) are intentionally not implemented --
+#   this app has no camera/lens hardware and does limits/inversion in its own
+#   config instead of the PTCR's. Everything else in MN00162 Sec 2.9 IS
+#   implemented: heater (97H), comm timeout (96H), max speed (9CH), firmware
+#   revision (9AH), ramp parameters (92H), encoder align (9DH), homing cycle
+#   (9EH), identity (9FH).
 #
 #   Frame:   STX  Identity  Cmd  [data...]  LRC  ETX     (host -> PTCR)
 #            ACK  Identity  Cmd  [data...]  LRC  ETX     (PTCR -> host, NAK on error)
@@ -39,7 +41,14 @@ CMD_MOVE_ABS   = 0x33   # move to entered (absolute) coordinates
 CMD_MOVE_DELTA = 0x34   # move to delta (relative) coordinates
 CMD_MOVE_ZERO  = 0x35   # move to absolute 0/0
 CMD_MOVE_HOME  = 0x36   # move to home (preset 31)
-CMD_HEATER     = 0x97   # get/set heater configuration
+CMD_RAMP_PARAMS  = 0x92   # get/set pan & tilt ramp (accel/decel/start-stop) parameters
+CMD_COMM_TIMEOUT = 0x96   # get/set communication timeout
+CMD_HEATER       = 0x97   # get/set heater configuration
+CMD_FIRMWARE_REV = 0x9A   # get firmware revision
+CMD_MAX_SPEED    = 0x9C   # get/set/store maximum speed
+CMD_ENCODER_ALIGN = 0x9D  # initial encoder align (pan center)
+CMD_HOMING_CYCLE  = 0x9E  # perform homing cycle (hunt for index pulse, both axes)
+CMD_IDENTITY      = 0x9F  # get/set RS-485 daisy-chain identity address
 
 #   31H command bitset bits (Sec 2.2)
 BIT_RES  = 0x01   # reset latched faults
@@ -61,6 +70,28 @@ HEATER_QUERY_BIT = 0x80
 HEATER_OFF   = 0   # "No Heat" -- heater disabled, reduces overall current draw
 HEATER_SHARE = 1   # heater cycles off while the axis motors are moving (caps peak current)
 HEATER_FULL  = 2   # heater runs concurrently with motor operation
+
+#   96H Timeout byte (Sec 2.9.8): bit 7 = Query, bits 6-0 = seconds (0-120).
+#   0 disables ("defeats") the comm-timeout fault entirely.
+COMM_TIMEOUT_QUERY_BIT = 0x80
+COMM_TIMEOUT_DISABLED = 0
+
+#   92H bitset (Sec 2.9.4): Query lives on the P Start/Stop byte only: bit 7
+#   there = Query (read current values without changing them). The T
+#   Start/Stop byte's bit 7 is unused/reserved. Reserve bytes are always 0.
+RAMP_QUERY_BIT = 0x80
+
+#   9CH Pan/Tilt bitset (Sec 2.9.10): bit 7 = Query, bit 6 = STOR (write to
+#   non-volatile memory, loaded again at power-up, instead of just the
+#   current session's volatile value).
+MAX_SPEED_QUERY_BIT = 0x80
+MAX_SPEED_STOR_BIT  = 0x40
+
+#   9FH New Identity byte (Sec 2.9.14): bit 7 = Query, bits 6-0 = address.
+#   0 = dedicated RS-232/RS-422 or broadcast (this driver's default and the
+#   only mode this app uses -- identity only matters on a shared RS-485
+#   daisy chain).
+IDENTITY_QUERY_BIT = 0x80
 
 
 class QptError(Exception):
@@ -314,6 +345,128 @@ class Qpt90:
         if not data:
             raise QptFrameError("Heater set response was empty")
         return data[0] & 0x7F
+
+    def get_comm_timeout(self):
+        #   96H with the Query bit set: seconds before the positioner treats
+        #   a lost link as a fault and stops (0 = disabled/"defeat")
+        data = self.transact(CMD_COMM_TIMEOUT, bytes([COMM_TIMEOUT_QUERY_BIT]))
+        if not data:
+            raise QptFrameError("Comm-timeout query response was empty")
+        return data[0] & 0x7F
+
+    def set_comm_timeout(self, seconds):
+        #   96H with the Query bit clear: 0-120 seconds; 0 disables the
+        #   comm-loss fault entirely (all other faults remain active)
+        if not 0 <= seconds <= 120:
+            raise ValueError("comm timeout must be 0-120 seconds")
+        data = self.transact(CMD_COMM_TIMEOUT, bytes([seconds & 0x7F]))
+        if not data:
+            raise QptFrameError("Comm-timeout set response was empty")
+        return data[0] & 0x7F
+
+    def get_max_speed(self, stored=False):
+        #   9CH with the Query bit set: current volatile (session) values,
+        #   or -- with STOR also set -- the stored non-volatile defaults
+        bitset = MAX_SPEED_QUERY_BIT | (MAX_SPEED_STOR_BIT if stored else 0)
+        data = self.transact(CMD_MAX_SPEED, bytes([bitset, 0, 0]))
+        if len(data) < 3:
+            raise QptFrameError(f"Max-speed query response too short: {data.hex()}")
+        return data[1], data[2]
+
+    def set_max_speed(self, pan_max, tilt_max, stored=False):
+        #   9CH with the Query bit clear: writes the volatile (session-only)
+        #   values, or -- with STOR set -- to non-volatile memory (loaded
+        #   again at power-up)
+        if not (1 <= pan_max <= 255 and 1 <= tilt_max <= 255):
+            raise ValueError("max speed must be 1-255 per axis")
+        bitset = MAX_SPEED_STOR_BIT if stored else 0
+        data = self.transact(CMD_MAX_SPEED, bytes([bitset, pan_max & 0xFF, tilt_max & 0xFF]))
+        if len(data) < 3:
+            raise QptFrameError(f"Max-speed set response too short: {data.hex()}")
+        return data[1], data[2]
+
+    def get_firmware_revision(self):
+        #   9AH: no request data; response is major, minor, day, month,
+        #   year (0-99, representing 2000-2099)
+        data = self.transact(CMD_FIRMWARE_REV)
+        if len(data) < 5:
+            raise QptFrameError(f"Firmware revision response too short: {data.hex()}")
+        return {"major": data[0], "minor": data[1], "day": data[2], "month": data[3], "year": 2000 + data[4]}
+
+    def get_ramp_params(self):
+        #   92H with the Query bit set (on the P Start/Stop byte): current
+        #   accel/decel/ramp tuning for both axes. See MN00162 Sec 2.9.4 for
+        #   what these values mean -- they're platform/load-dependent.
+        data = self.transact(CMD_RAMP_PARAMS, bytes([RAMP_QUERY_BIT, 0, 1, 0, 0, 0, 1, 0]))
+        if len(data) < 8:
+            raise QptFrameError(f"Ramp-params query response too short: {data.hex()}")
+        return {
+            "pan_start_stop": data[0], "pan_acc_dec": data[1], "pan_ramp": data[2],
+            "tilt_start_stop": data[4], "tilt_acc_dec": data[5], "tilt_ramp": data[6],
+        }
+
+    def set_ramp_params(self, pan_start_stop, pan_acc_dec, pan_ramp,
+                         tilt_start_stop, tilt_acc_dec, tilt_ramp):
+        #   92H with the Query bit clear: writes accel/decel/ramp tuning for
+        #   both axes to non-volatile memory. Derive these by testing (MN00162
+        #   Sec 2.9.4) -- there's no safe platform-independent default.
+        data = self.transact(CMD_RAMP_PARAMS, bytes([
+            pan_start_stop & 0x7F, pan_acc_dec & 0xFF, pan_ramp & 0xFF, 0,
+            tilt_start_stop & 0x7F, tilt_acc_dec & 0xFF, tilt_ramp & 0xFF, 0,
+        ]))
+        if len(data) < 8:
+            raise QptFrameError(f"Ramp-params set response too short: {data.hex()}")
+        return {
+            "pan_start_stop": data[0], "pan_acc_dec": data[1], "pan_ramp": data[2],
+            "tilt_start_stop": data[4], "tilt_acc_dec": data[5], "tilt_ramp": data[6],
+        }
+
+    def initial_encoder_align(self, timeout=15.0):
+        #   9DH: BLOCKS on the unit while it hunts for the pan index pulse --
+        #   the positioner stops responding to anything else until this
+        #   completes, so this needs a longer-than-default timeout.
+        data = self.transact(CMD_ENCODER_ALIGN, timeout=timeout)
+        if len(data) < 6:
+            raise QptFrameError(f"Encoder-align response too short: {data.hex()}")
+        return {"pan_index_deg": i24le_to_deg(data[0:3]), "tilt_index_deg": i24le_to_deg(data[3:6])}
+
+    def perform_homing_cycle(self, timeout=30.0):
+        #   9EH: BLOCKS on the unit while it hunts for the index pulse on
+        #   both axes and returns to its original (corrected) position --
+        #   can take several seconds, needs a longer-than-default timeout.
+        data = self.transact(CMD_HOMING_CYCLE, timeout=timeout)
+        if len(data) < 7:
+            raise QptFrameError(f"Homing-cycle response too short: {data.hex()}")
+        bitset = data[0]
+        return {
+            "pan_index_found": bool(bitset & 0x01),
+            "tilt_index_found": bool(bitset & 0x02),
+            "pan_offset_deg": i24le_to_deg(data[1:4]),
+            "tilt_offset_deg": i24le_to_deg(data[4:7]),
+        }
+
+    def get_identity(self):
+        #   9FH with the Query bit set, sent at this driver's current
+        #   identity (0 = broadcast/dedicated, this app's default, will make
+        #   any attached unit answer)
+        data = self.transact(CMD_IDENTITY, bytes([IDENTITY_QUERY_BIT]))
+        if not data:
+            raise QptFrameError("Identity query response was empty")
+        return data[0] & 0x7F
+
+    def set_identity(self, new_identity):
+        #   9FH with the Query bit clear: changes the unit's RS-485
+        #   daisy-chain address. Must be sent addressed to the unit's CURRENT
+        #   identity (self.identity) -- irrelevant on a dedicated RS-232/
+        #   RS-422 link (identity 0), which is everything this app uses.
+        if not 0 <= new_identity <= 99:
+            raise ValueError("identity must be 0-99")
+        data = self.transact(CMD_IDENTITY, bytes([new_identity & 0x7F]))
+        if not data:
+            raise QptFrameError("Identity set response was empty")
+        confirmed = data[0] & 0x7F
+        self.identity = confirmed
+        return confirmed
 
 
 def open_serial(port, baud):

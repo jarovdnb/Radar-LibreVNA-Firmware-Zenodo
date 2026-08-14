@@ -18,11 +18,17 @@ import yaml
 
 from lib import qpt90
 from lib import pantilt_program
+from lib import keepout
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config", "pantilt_local_config.yaml")
 PROGRAMS_DIR = os.path.join(BASE_DIR, "programs")
+#   One keep-out sample file per instrument/mount (different antenna geometry
+#   -> different safe envelope); which one is active is the keepout_profile
+#   setting below. debug_notebook.ipynb writes into this same directory.
+KEEPOUT_DIR = os.path.join(BASE_DIR, "config", "keepout")
 os.makedirs(PROGRAMS_DIR, exist_ok=True)
+os.makedirs(KEEPOUT_DIR, exist_ok=True)
 
 #   Hard caps: configured limits can never exceed these
 PAN_ABS_CAP = 180.0
@@ -45,6 +51,7 @@ SETTINGS_DEFAULTS = {
     "speed_deg_per_s_estimate": 4.0, "settle_seconds": 2,
     "move_timeout_seconds": 120, "min_gap_seconds": 60, "warn_margin_deg": 2.0,
     "heater_config": 1, "simulated_measure_seconds": 1.0,   # 1=off in the UI's 1/2/3 convention -- see apply_heater_config
+    "keepout_profile": "",   # basename (no .json) of the active file in config/keepout/; "" = unrestricted
 }
 
 
@@ -69,6 +76,12 @@ active_prog = None
 active_prog_file = ""
 auto_schedule = {}   # point index -> next due time (unix s), automated only
 
+#   Coupled pan/tilt keep-out envelope (lib/keepout.py) for whichever
+#   instrument/mount is currently selected (settings.keepout_profile).
+#   Empty list = no profile selected, or nothing measured yet = unrestricted
+#   (keepout.is_safe always returns True).
+_keepout_breakpoints = []
+
 #   State shared with the Flask app; every mutation happens under _lock so
 #   get_live() always returns a consistent snapshot
 live = {
@@ -81,6 +94,7 @@ live = {
     "estimated_remaining_s": 0, "heater_state": 0, "log": [],
     "next_measurement_utc": "", "next_measurement_in_s": 0,
     "next_pan_rel": 0.0, "next_tilt_rel": 0.0,
+    "keepout_profile": "", "keepout_breakpoints": 0,
 }
 
 
@@ -137,6 +151,49 @@ def update_settings(updates):
         snapshot = dict(_settings)
     _write_settings_file(snapshot)
     return snapshot
+
+
+def keepout_profile_path(profile):
+    #   Basename only -- never trust a profile name as a path
+    name = os.path.basename(profile or "")
+    return os.path.join(KEEPOUT_DIR, f"{name}.json") if name else ""
+
+
+def list_keepout_profiles():
+    if not os.path.isdir(KEEPOUT_DIR):
+        return []
+    return sorted(f[:-5] for f in os.listdir(KEEPOUT_DIR) if f.lower().endswith(".json"))
+
+
+def load_keepout(cfg):
+    #   Re-run whenever keepout_profile changes (see the "update_settings"
+    #   command) as well as at startup -- cheap (a small JSON file), and the
+    #   profile is meant to be switched between instruments without
+    #   restarting the app. The debug notebook writes samples offline
+    #   (app.py and the notebook can't hold the serial port at the same
+    #   time), so there's no need to hot-reload the SAME file mid-session.
+    global _keepout_breakpoints
+    profile = cfg.get("keepout_profile", "")
+    path = keepout_profile_path(profile)
+
+    if not path:
+        _keepout_breakpoints = []
+        with _lock:
+            live["keepout_profile"] = ""
+            live["keepout_breakpoints"] = 0
+        log("No keep-out profile selected -- pan/tilt moves are unrestricted by antenna geometry")
+        return
+
+    _keepout_breakpoints = keepout.load_breakpoints(path)
+    with _lock:
+        live["keepout_profile"] = profile
+        live["keepout_breakpoints"] = len(_keepout_breakpoints)
+
+    if _keepout_breakpoints:
+        log(f"Keep-out envelope loaded: profile '{profile}', {len(_keepout_breakpoints)} breakpoint(s)")
+    else:
+        log(f"Keep-out profile '{profile}' has no/insufficient samples yet ({path}) -- "
+            "pan/tilt moves are unrestricted by antenna geometry")
 
 
 #   Limits & fault helpers
@@ -234,9 +291,37 @@ def apply_heater_config(cfg):
     return True
 
 
+def apply_comm_timeout():
+    #   96H: hardware backstop -- the positioner halts itself if the daemon
+    #   dies or the link drops for more than this many seconds. Fixed value,
+    #   not user-configurable (matches the old removed driver's behavior).
+    try:
+        driver.set_comm_timeout(2)
+    except (qpt90.QptError, OSError) as e:
+        log(f"Comm timeout could not be applied: {e}")
+        set_fault(f"Comm timeout could not be applied: {e}")
+        return False
+    return True
+
+
+def apply_max_speed(cfg):
+    #   9CH: caps automated-move speed per axis. Session-only (not written to
+    #   non-volatile memory) so every reconnect re-applies whatever the
+    #   config currently says, same as heater/comm-timeout.
+    pan_max = int(cfg.get("pan_max_speed", 64))
+    tilt_max = int(cfg.get("tilt_max_speed", 64))
+    try:
+        driver.set_max_speed(pan_max, tilt_max)
+    except (qpt90.QptError, OSError) as e:
+        log(f"Max speed could not be applied: {e}")
+        set_fault(f"Max speed could not be applied: {e}")
+        return False
+    return True
+
+
 def apply_positioner_settings(cfg):
-    #   qpt90 doesn't implement max-speed or comm-timeout commands yet (MN00162
-    #   Sec 2.9.8/2.9.10 weren't available when the driver was written).
+    apply_comm_timeout()
+    apply_max_speed(cfg)
     apply_heater_config(cfg)
 
 
@@ -313,17 +398,10 @@ def wait_move_done(cfg):
     return "fault"
 
 
-def move_abs(pan_abs, tilt_abs, cfg):
-    #   Validated absolute move; returns "done", "aborted" or "fault"
-    if not target_allowed(pan_abs, tilt_abs, cfg):
-        pan_min, pan_max, tilt_min, tilt_max = effective_limits(cfg)
-        set_fault(f"Move to pan {pan_abs}° / tilt {tilt_abs}° refused: outside absolute limits "
-                  f"(pan [{pan_min}°, {pan_max}°], tilt [{tilt_min}°, {tilt_max}°])")
-        return "fault"
-
-    raw_pan = flip(pan_abs, cfg.get("pan_invert", 0) == 1)
-    raw_tilt = flip(tilt_abs, cfg.get("tilt_invert", 0) == 1)
-
+def _send_move(raw_pan, raw_tilt, pan_abs, tilt_abs, cfg):
+    #   Sends ONE move to the driver and waits for it to finish. pan_abs/
+    #   tilt_abs (logical/display values) are only used for the fault
+    #   message if the positioner itself rejects the move.
     try:
         driver.move_to(raw_pan, raw_tilt)
     except qpt90.QptNak:
@@ -331,6 +409,69 @@ def move_abs(pan_abs, tilt_abs, cfg):
         return "fault"
     except (qpt90.QptError, OSError) as e:
         raise ConnectionLost(str(e))
+    return wait_move_done(cfg)
+
+
+def move_abs(pan_abs, tilt_abs, cfg):
+    #   Validated absolute move; returns "done", "aborted" or "fault".
+    #   Two independent safety checks: the existing box limits (pan/tilt
+    #   min/max_abs) and the coupled antenna/bar keep-out envelope
+    #   (lib/keepout.py) -- see that module's docstring for why the keep-out
+    #   check operates on RAW hardware angles, not these logical ones.
+    if not target_allowed(pan_abs, tilt_abs, cfg):
+        pan_min, pan_max, tilt_min, tilt_max = effective_limits(cfg)
+        set_fault(f"Move to pan {pan_abs}° / tilt {tilt_abs}° refused: outside absolute limits "
+                  f"(pan [{pan_min}°, {pan_max}°], tilt [{tilt_min}°, {tilt_max}°])")
+        return "fault"
+
+    pan_inverted = cfg.get("pan_invert", 0) == 1
+    tilt_inverted = cfg.get("tilt_invert", 0) == 1
+    raw_pan = flip(pan_abs, pan_inverted)
+    raw_tilt = flip(tilt_abs, tilt_inverted)
+
+    if not keepout.is_safe(raw_pan, raw_tilt, _keepout_breakpoints):
+        set_fault(f"Move to pan {pan_abs}° / tilt {tilt_abs}° refused: inside the antenna/bar keep-out zone")
+        return "fault"
+
+    if not _keepout_breakpoints:
+        return _send_move(raw_pan, raw_tilt, pan_abs, tilt_abs, cfg)
+
+    with _lock:
+        cur_raw_pan = flip(live["pan_abs"], pan_inverted)
+        cur_raw_tilt = flip(live["tilt_abs"], tilt_inverted)
+
+    if cur_raw_pan == raw_pan or cur_raw_tilt == raw_tilt:
+        #   Already a single-axis move -- the endpoint check above already
+        #   covers the whole path, since only one coordinate is changing.
+        return _send_move(raw_pan, raw_tilt, pan_abs, tilt_abs, cfg)
+
+    #   Coupled move: the protocol doesn't guarantee a straight-line path
+    #   between two diagonal pan/tilt targets -- each axis has its own motor
+    #   and speed with no coordinated trajectory described in MN00162, so a
+    #   single diagonal move_to could cut through the keep-out zone even if
+    #   both endpoints are individually safe. Sequence it as three
+    #   single-axis legs instead, through a pan value proven safe across
+    #   every tilt the move will cross.
+    raw_pan_min = max(float(cfg.get("pan_min_abs", -PAN_ABS_CAP)), -PAN_ABS_CAP)
+    raw_pan_max = min(float(cfg.get("pan_max_abs", PAN_ABS_CAP)), PAN_ABS_CAP)
+    safe_range = keepout.safe_pan_intersection_over_sweep(cur_raw_tilt, raw_tilt, _keepout_breakpoints)
+    if safe_range is not None:
+        lo = max(safe_range[0], raw_pan_min)
+        hi = min(safe_range[1], raw_pan_max)
+        safe_range = (lo, hi) if lo <= hi else None
+    if safe_range is None:
+        set_fault(f"Move to pan {pan_abs}° / tilt {tilt_abs}° refused: no single-axis-safe path "
+                  f"avoids the keep-out zone between the current and target tilt")
+        return "fault"
+    waypoint_pan = min(max(cur_raw_pan, safe_range[0]), safe_range[1])
+
+    result = _send_move(waypoint_pan, cur_raw_tilt, pan_abs, tilt_abs, cfg)
+    if result != "done":
+        return result
+    result = _send_move(waypoint_pan, raw_tilt, pan_abs, tilt_abs, cfg)
+    if result != "done":
+        return result
+    return _send_move(raw_pan, raw_tilt, pan_abs, tilt_abs, cfg)
 
     return wait_move_done(cfg)
 
@@ -596,7 +737,10 @@ def process_commands():
 
         #   Works even while disconnected (e.g. configuring the COM port)
         if kind == "update_settings":
-            cfg = update_settings(cmd.get("values", {}))
+            values = cmd.get("values", {})
+            cfg = update_settings(values)
+            if "keepout_profile" in values:
+                load_keepout(cfg)
             if driver is not None:
                 apply_positioner_settings(cfg)
                 if not target_allowed(live["pan_abs"], live["tilt_abs"], cfg):
@@ -687,7 +831,8 @@ def process_commands():
 def run_forever():
     global retry_started, next_retry
 
-    load_settings()
+    cfg = load_settings()
+    load_keepout(cfg)
     retry_started = time.time()
     next_retry = time.time()
 
