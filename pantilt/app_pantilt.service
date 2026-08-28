@@ -3,6 +3,7 @@ Description=Pan-Tilt Dashboard Service
 After=network.target
 
 [Service]
+EnvironmentFile=-/home/pi/Radar-LibreVNA-Firmware/pantilt/pantilt-dashboard/.env
 ExecStart=/usr/bin/python3 /home/pi/Radar-LibreVNA-Firmware/pantilt/pantilt-dashboard/app_pantilt.py
 WorkingDirectory=/home/pi/Radar-LibreVNA-Firmware/pantilt/pantilt-dashboard
 Restart=always
