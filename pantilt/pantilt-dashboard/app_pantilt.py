@@ -1,9 +1,10 @@
 from flask import Flask, render_template, request, jsonify, Response
-from werkzeug.security import check_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 import yaml
 import json
 import os
 import re
+import secrets
 import functools
 from datetime import datetime
 from pathlib import Path
@@ -15,12 +16,23 @@ from lib import pantilt_program
 from lib import pantilt_config
 from lib import keepout
 
-# Set username and password
-USERNAME = 'admin'
-PASSWORD_HASH = "REDACTED_PASSWORD_HASH"
+# Set username and password via environment variables:
+#   PANTILT_DASHBOARD_USER=youruser
+#   PANTILT_DASHBOARD_PASSWORD_HASH=$(python3 -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('your-password'))")
+# If PANTILT_DASHBOARD_PASSWORD_HASH isn't set, a random password is generated
+# at startup and printed once below.
+USERNAME = os.environ.get("PANTILT_DASHBOARD_USER", "admin")
+PASSWORD_HASH = os.environ.get("PANTILT_DASHBOARD_PASSWORD_HASH")
+if not PASSWORD_HASH:
+    _generated_password = secrets.token_urlsafe(12)
+    PASSWORD_HASH = generate_password_hash(_generated_password)
+    print(f"[pantilt-dashboard] No PANTILT_DASHBOARD_PASSWORD_HASH set -- "
+          f"generated login for this run: {USERNAME} / {_generated_password}")
 
 app = Flask(__name__)
-app.secret_key = 'REDACTED_SECRET_KEY'
+# Session-signing key. Set PANTILT_DASHBOARD_SECRET_KEY to a fixed value if you
+# need sessions to survive a process restart; otherwise a random one is used.
+app.secret_key = os.environ.get("PANTILT_DASHBOARD_SECRET_KEY", secrets.token_hex(32))
 
 home_dir = os.path.expanduser("~")
 CONFIG_PATH = os.environ.get("PANTILT_CONFIG_PATH", home_dir + "/pantilt_config.yaml")
