@@ -28,6 +28,7 @@ from lib.socket_helper import bind_local_socket, close_local_socket
 from lib import pantilt_config
 from lib import qpt90
 from lib import pantilt_program
+from lib import keepout
 
 #   Hard caps (safety limits, not a PTCR-96 protocol constraint -- some
 #   PTCR-96 platforms support continuous pan rotation): the config limits
@@ -37,6 +38,13 @@ TILT_ABS_CAP = 90.0
 
 PANTILT_SOCKET_PATH = "/tmp/pantilt_socket.sock"
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+#   One keep-out sample file per instrument/mount (different antenna geometry
+#   -> different safe envelope); which one is active is the keepout_profile
+#   setting below. pt_keepout_record.py writes into this same directory.
+KEEPOUT_DIR = os.path.join(BASE_DIR, "config", "keepout")
+os.makedirs(KEEPOUT_DIR, exist_ok=True)
+
 #   Connection retry ladder: every 10 s for the first 5 minutes, then every 30 minutes
 RETRY_FAST_S = 10
 RETRY_FAST_WINDOW_S = 300
@@ -45,6 +53,12 @@ RETRY_SLOW_S = 1800
 #   Defaults, also used to migrate an already-deployed pan-tilt config file
 PANTILT_DEFAULTS = {
     "enabled": 0, "port": "", "baud": 9600,
+    #   IP transport (lib/qpt90.py's open_tcp()/find_qpt90_tcp()), an
+    #   alternative to the port/baud serial link above -- this unit's
+    #   Lantronix "IP option", a serial-to-Ethernet bridge wired to the same
+    #   RS-232 port. transport="serial" (default) uses port/baud exactly as
+    #   before; transport="ip" uses host/tcp_port instead. See try_connect().
+    "transport": "serial", "host": "", "tcp_port": 10001,
     "pan_min_abs": -180.0, "pan_max_abs": 180.0,
     "tilt_min_abs": -90.0, "tilt_max_abs": 90.0,
     "home_pan_abs": 0.0, "home_tilt_abs": 0.0,
@@ -57,13 +71,14 @@ PANTILT_DEFAULTS = {
     "move_pan_rel": 0.0, "move_tilt_rel": 0.0, "move_request": 0,
     "set_home": 0, "clear_fault": 0, "measure_request": 0,
     "run_program": "", "pause_program": 0, "resume_program": 0, "stop_program": 0,
-    "heater_config": 1,   # 1=off (kept for UI/config compat; qpt90 doesn't
-                          # apply it to hardware -- see apply_heater_config)
+    "heater_config": 1,   # 1=off
+    "keepout_profile": "",   # basename (no .json) of the active file in config/keepout/; "" = unrestricted
 }
 PANTILT_STATUS_DEFAULTS = {
     "connected": 0, "pan_rel": 0.0, "tilt_rel": 0.0, "pan_abs": 0.0, "tilt_abs": 0.0,
     "active_program": "", "program_type": "", "program_next_index": 0,
     "program_paused": 0, "fault": "", "heater_state": 0,
+    "program_active_sweep": -1,  # index into active_prog["sweeps"] currently mid-execution, -1 = idle/not a sweeps program
 }
 
 #   Daemon state
@@ -77,17 +92,26 @@ was_enabled = True           # tracks pantilt.enabled's previous value, to detec
 active_prog = None           # parsed program (cache of pantilt_status.active_program)
 active_prog_file = ""
 auto_schedule = {}           # point index -> next due time (unix s), automated only
+series_next_due = None       # unix s the next sweep may start, single+repeat_minutes only
+sweep_schedule = {}          # sweep index -> next due time (unix s), sweeps only
+
+#   Coupled pan/tilt keep-out envelope (lib/keepout.py) for whichever
+#   instrument/mount is currently selected (pantilt_cfg.keepout_profile).
+#   Empty list = no profile selected, or nothing measured yet = unrestricted
+#   (keepout.is_safe always returns True).
+_keepout_breakpoints = []
+_keepout_profile_loaded = None   # sentinel: None means "never loaded yet"
 
 #   Live state broadcast on the pantilt socket (written by the main loop only)
 live = {
-    "pantilt_enabled": 0, "connected": 0, "port": "",
+    "pantilt_enabled": 0, "connected": 0, "connecting": 0, "port": "",
     "pan_rel": 0.0, "tilt_rel": 0.0, "pan_abs": 0.0, "tilt_abs": 0.0,
     "moving": 0, "measuring": 0, "fault": "", "retry_in_s": 0,
     "program_name": "", "program_type": "", "program_state": "",
     "program_progress": "", "next_measurement_utc": "", "next_measurement_in_s": 0,
     "next_pan_rel": 0.0, "next_tilt_rel": 0.0,
     "steps_done": 0, "steps_total": 0, "upcoming_points": [], "estimated_remaining_s": 0,
-    "heater_state": 0,
+    "heater_state": 0, "keepout_profile": "", "keepout_breakpoints": 0,
 }
 
 
@@ -155,6 +179,35 @@ def set_fault(text):
         update_yaml_flag("pantilt_status", "fault", text)
 
 
+def load_keepout(pantilt_cfg):
+    #   Re-run whenever keepout_profile changes (see process_commands's
+    #   "update" branch) as well as at daemon start -- cheap (a small JSON
+    #   file). pt_keepout_record.py writes samples offline (it can't hold the
+    #   serial port at the same time as this daemon), so there's no need to
+    #   hot-reload the SAME file mid-session.
+    global _keepout_breakpoints, _keepout_profile_loaded
+    profile = pantilt_cfg.get("keepout_profile", "")
+    _keepout_profile_loaded = profile
+    path = keepout.profile_path(KEEPOUT_DIR, profile)
+
+    if not path:
+        _keepout_breakpoints = []
+        live["keepout_profile"] = ""
+        live["keepout_breakpoints"] = 0
+        print("ℹ️ No keep-out profile selected -- pan/tilt moves are unrestricted by antenna geometry")
+        return
+
+    _keepout_breakpoints = keepout.load_breakpoints(path)
+    live["keepout_profile"] = profile
+    live["keepout_breakpoints"] = len(_keepout_breakpoints)
+
+    if _keepout_breakpoints:
+        print(f"✅ Keep-out envelope loaded: profile '{profile}', {len(_keepout_breakpoints)} breakpoint(s)")
+    else:
+        print(f"⚠️ Keep-out profile '{profile}' has no/insufficient samples yet ({path}) -- "
+              "pan/tilt moves are unrestricted by antenna geometry")
+
+
 #   Connection handling
 
 def flip(value, inverted):
@@ -205,27 +258,77 @@ def persist_position(pantilt_cfg):
 
 
 def apply_heater_config(pantilt_cfg):
-    #   The old QPT-50 driver's 97H set/query round-trip (set desired mode,
-    #   re-query to confirm the unit actually accepted it) has no equivalent
-    #   here yet: qpt90 (PTCR-96) doesn't implement heater control -- the
-    #   command's data layout (MN00162 Sec 2.9.7) wasn't available when the
-    #   driver was written. Accept the setting so the dashboard's heater
-    #   dropdown still works and round-trips through config, but don't send
-    #   anything to hardware and don't claim a mode was confirmed.
-    update_yaml_flag("pantilt_status", "heater_state", 0)
-    live["heater_state"] = 0
+    #   97H: set the desired mode, then re-query independently to confirm the
+    #   unit actually accepted it (a mismatch means no heater is fitted, or a
+    #   fault prevented the change) rather than trusting only the set's own ACK.
+    #
+    #   The UI/config heater_config field is 1=Off/2=Share/3=Full (unchanged
+    #   convention, shared with the old removed driver's byte values), but
+    #   qpt90's actual wire format (MN00162 Sec 2.9.7) is 0=No Heat/1=Share/
+    #   2=Full Heat with a separate Query bit -- translate by -1/+1 at this
+    #   boundary and keep the UI-facing 1/2/3 convention everywhere else.
+    desired_ui = int(pantilt_cfg.get("heater_config", 1))
+    desired = max(qpt90.HEATER_OFF, min(qpt90.HEATER_FULL, desired_ui - 1))
+    try:
+        driver.set_heater_config(desired)
+        confirmed = driver.get_heater_config()
+    except (qpt90.QptError, OSError) as e:
+        print(f"⚠️ Heater config could not be applied: {e}")
+        live["heater_state"] = 0
+        update_yaml_flag("pantilt_status", "heater_state", 0)
+        set_fault(f"Heater config could not be applied: {e}")
+        return False
+
+    confirmed_ui = confirmed + 1
+    live["heater_state"] = confirmed_ui
+    update_yaml_flag("pantilt_status", "heater_state", confirmed_ui)
+
+    if confirmed != desired:
+        set_fault(f"Heater confirmed in mode {confirmed_ui}, requested mode {desired_ui}")
+        return False
+
+    return True
+
+
+def apply_comm_timeout():
+    #   96H: hardware backstop -- the positioner halts itself if the daemon
+    #   dies or the link drops for more than this many seconds. Fixed value,
+    #   not user-configurable (matches the old removed driver's behavior).
+    try:
+        driver.set_comm_timeout(2)
+    except (qpt90.QptError, OSError) as e:
+        print(f"⚠️ Comm timeout could not be applied: {e}")
+        set_fault(f"Comm timeout could not be applied: {e}")
+        return False
+    return True
+
+
+def apply_max_speed(pantilt_cfg):
+    #   9CH: caps automated-move speed per axis. Session-only (not written to
+    #   non-volatile memory) so every reconnect re-applies whatever the
+    #   config currently says, same as heater/comm-timeout.
+    pan_max = int(pantilt_cfg.get("pan_max_speed", 64))
+    tilt_max = int(pantilt_cfg.get("tilt_max_speed", 64))
+    try:
+        driver.set_max_speed(pan_max, tilt_max)
+    except (qpt90.QptError, OSError) as e:
+        print(f"⚠️ Max speed could not be applied: {e}")
+        set_fault(f"Max speed could not be applied: {e}")
+        return False
     return True
 
 
 def apply_positioner_settings(pantilt_cfg):
-    #   The old QPT-50 driver also set max speeds (99H) and a comm-timeout
-    #   hardware backstop (96H, unit halts itself if the daemon dies) here.
-    #   qpt90 doesn't implement either command yet (MN00162 Sec 2.9.8/2.9.10
-    #   weren't available when the driver was written) -- pan_max_speed/
-    #   tilt_max_speed are still accepted and recorded in config for later,
-    #   but nothing is sent to hardware, and the comm-timeout safety backstop
-    #   is NOT currently in effect on this positioner.
+    apply_comm_timeout()
+    apply_max_speed(pantilt_cfg)
     apply_heater_config(pantilt_cfg)
+
+
+def module_disabled():
+    #   Polled by qpt90.find_qpt90/connect during a scan so disabling the module
+    #   mid-connect aborts promptly instead of waiting out the full port scan
+    #   (each candidate port can take up to ~20 s to time out).
+    return retrieve_yaml_file().get("pantilt", {}).get("enabled", 0) != 1
 
 
 def try_connect(config):
@@ -233,7 +336,14 @@ def try_connect(config):
 
     pantilt_cfg = config.get("pantilt", {})
 
-    connected_port_name, driver = qpt90.find_qpt90(pantilt_cfg.get("port", ""), int(pantilt_cfg.get("baud", 9600)))
+    if pantilt_cfg.get("transport", "serial") == "ip":
+        connected_port_name, driver = qpt90.find_qpt90_tcp(
+            pantilt_cfg.get("host", ""), int(pantilt_cfg.get("tcp_port", 10001)),
+            should_abort=module_disabled)
+    else:
+        connected_port_name, driver = qpt90.find_qpt90(
+            pantilt_cfg.get("port", ""), int(pantilt_cfg.get("baud", 9600)),
+            should_abort=module_disabled)
     serial_port = driver.ser if driver else None
 
     if driver is None:
@@ -313,17 +423,10 @@ def wait_move_done(pantilt_cfg):
     return "fault"
 
 
-def move_abs(pan_abs, tilt_abs, pantilt_cfg):
-    #   Validated absolute move; returns "done", "aborted" or "fault"
-    if not target_allowed(pan_abs, tilt_abs, pantilt_cfg):
-        pan_min, pan_max, tilt_min, tilt_max = effective_limits(pantilt_cfg)
-        set_fault(f"Move to pan {pan_abs}° / tilt {tilt_abs}° refused: outside absolute limits "
-                  f"(pan [{pan_min}°, {pan_max}°], tilt [{tilt_min}°, {tilt_max}°])")
-        return "fault"
-
-    raw_pan = flip(pan_abs, pantilt_cfg.get("pan_invert", 0) == 1)
-    raw_tilt = flip(tilt_abs, pantilt_cfg.get("tilt_invert", 0) == 1)
-
+def _send_move(raw_pan, raw_tilt, pan_abs, tilt_abs, pantilt_cfg):
+    #   Sends ONE move to the driver and waits for it to finish. pan_abs/
+    #   tilt_abs (logical/display values) are only used for the fault
+    #   message if the positioner itself rejects the move.
     try:
         driver.move_to(raw_pan, raw_tilt)
     except qpt90.QptNak:
@@ -331,8 +434,87 @@ def move_abs(pan_abs, tilt_abs, pantilt_cfg):
         return "fault"
     except (qpt90.QptError, OSError) as e:
         raise ConnectionLost(str(e))
-
     return wait_move_done(pantilt_cfg)
+
+
+def move_abs(pan_abs, tilt_abs, pantilt_cfg):
+    #   Validated absolute move; returns "done", "aborted" or "fault". Two
+    #   independent safety checks: the box limits (pan/tilt min/max_abs) and
+    #   the coupled antenna/bar keep-out envelope (lib/keepout.py) -- see
+    #   that module's docstring for why the keep-out check operates on RAW
+    #   hardware angles, not these logical ones.
+    if not target_allowed(pan_abs, tilt_abs, pantilt_cfg):
+        pan_min, pan_max, tilt_min, tilt_max = effective_limits(pantilt_cfg)
+        set_fault(f"Move to pan {pan_abs}° / tilt {tilt_abs}° refused: outside absolute limits "
+                  f"(pan [{pan_min}°, {pan_max}°], tilt [{tilt_min}°, {tilt_max}°])")
+        return "fault"
+
+    pan_inverted = pantilt_cfg.get("pan_invert", 0) == 1
+    tilt_inverted = pantilt_cfg.get("tilt_invert", 0) == 1
+    raw_pan = flip(pan_abs, pan_inverted)
+    raw_tilt = flip(tilt_abs, tilt_inverted)
+
+    if not keepout.is_safe(raw_pan, raw_tilt, _keepout_breakpoints):
+        set_fault(f"Move to pan {pan_abs}° / tilt {tilt_abs}° refused: inside the antenna/bar keep-out zone")
+        return "fault"
+
+    if not _keepout_breakpoints:
+        return _send_move(raw_pan, raw_tilt, pan_abs, tilt_abs, pantilt_cfg)
+
+    cur_raw_pan = flip(live["pan_abs"], pan_inverted)
+    cur_raw_tilt = flip(live["tilt_abs"], tilt_inverted)
+
+    if cur_raw_pan == raw_pan:
+        #   Pan fixed, tilt sweeping -- lib/keepout.py is pan-indexed, so a
+        #   fixed pan has ONE contiguous safe tilt band; the endpoint check
+        #   above already covers the whole path (both endpoints inside that
+        #   same single interval implies everything between them is too).
+        return _send_move(raw_pan, raw_tilt, pan_abs, tilt_abs, pantilt_cfg)
+
+    if cur_raw_tilt == raw_tilt:
+        #   Tilt fixed, pan sweeping -- NOT covered by the endpoint check:
+        #   the safe tilt band can differ at every pan crossed (that's the
+        #   whole reason for pan-indexing -- e.g. a bar of finite length,
+        #   clear near both pan extremes but blocking a fixed mid tilt near
+        #   pan=0). Both endpoints being individually safe does not mean the
+        #   straight sweep between them stays out of the zone; verify the
+        #   fixed tilt against the full pan range crossed, same as a
+        #   diagonal move's tilt-side check below.
+        safe_range = keepout.safe_tilt_intersection_over_sweep(cur_raw_pan, raw_pan, _keepout_breakpoints)
+        if safe_range is None or not (safe_range[0] <= raw_tilt <= safe_range[1]):
+            set_fault(f"Move to pan {pan_abs}° / tilt {tilt_abs}° refused: keep-out zone blocks "
+                      f"a direct pan sweep at this tilt")
+            return "fault"
+        return _send_move(raw_pan, raw_tilt, pan_abs, tilt_abs, pantilt_cfg)
+
+    #   Coupled move: the protocol doesn't guarantee a straight-line path
+    #   between two diagonal pan/tilt targets -- each axis has its own motor
+    #   and speed with no coordinated trajectory described in MN00162, so a
+    #   single diagonal move_to could cut through the keep-out zone even if
+    #   both endpoints are individually safe. Sequence it as three
+    #   single-axis legs instead, through a tilt value proven safe across
+    #   every pan the move will cross (lib/keepout.py is pan-indexed: a
+    #   fixed pan has one contiguous safe tilt band for this mount).
+    raw_tilt_min = max(float(pantilt_cfg.get("tilt_min_abs", -TILT_ABS_CAP)), -TILT_ABS_CAP)
+    raw_tilt_max = min(float(pantilt_cfg.get("tilt_max_abs", TILT_ABS_CAP)), TILT_ABS_CAP)
+    safe_range = keepout.safe_tilt_intersection_over_sweep(cur_raw_pan, raw_pan, _keepout_breakpoints)
+    if safe_range is not None:
+        lo = max(safe_range[0], raw_tilt_min)
+        hi = min(safe_range[1], raw_tilt_max)
+        safe_range = (lo, hi) if lo <= hi else None
+    if safe_range is None:
+        set_fault(f"Move to pan {pan_abs}° / tilt {tilt_abs}° refused: no single-axis-safe path "
+                  f"avoids the keep-out zone between the current and target pan")
+        return "fault"
+    waypoint_tilt = min(max(cur_raw_tilt, safe_range[0]), safe_range[1])
+
+    result = _send_move(cur_raw_pan, waypoint_tilt, pan_abs, tilt_abs, pantilt_cfg)
+    if result != "done":
+        return result
+    result = _send_move(raw_pan, waypoint_tilt, pan_abs, tilt_abs, pantilt_cfg)
+    if result != "done":
+        return result
+    return _send_move(raw_pan, raw_tilt, pan_abs, tilt_abs, pantilt_cfg)
 
 
 def settle(pantilt_cfg):
@@ -421,23 +603,28 @@ def run_point(point, pantilt_cfg, tries):
 
     settle(pantilt_cfg)
 
+    live["measuring"] = 1
     for attempt in range(tries):
         result = measure(pantilt_cfg)
         if result not in ("fault", "radar_unreachable"):
             break
         print(f"⚠️ Measurement attempt {attempt + 1}/{tries} failed ({result})")
+    live["measuring"] = 0
     return result
 
 
 #   Program handling
 
 def clear_program():
-    global active_prog, active_prog_file, auto_schedule
+    global active_prog, active_prog_file, auto_schedule, series_next_due, sweep_schedule
     active_prog = None
     active_prog_file = ""
     auto_schedule = {}
+    series_next_due = None
+    sweep_schedule = {}
     update_yaml_flags("pantilt_status", {"active_program": "", "program_type": "",
-                                         "program_next_index": 0, "program_paused": 0})
+                                         "program_next_index": 0, "program_paused": 0,
+                                         "program_active_sweep": -1})
 
 
 def pause_program(reason):
@@ -449,7 +636,7 @@ def pause_program(reason):
 def load_active_program(config):
     #   Cache the parsed program; (re)load and re-validate when the active file
     #   changes (daemon start, run_program, or after a limits/home change)
-    global active_prog, active_prog_file, auto_schedule
+    global active_prog, active_prog_file, auto_schedule, series_next_due, sweep_schedule
 
     program_file = config.get("pantilt_status", {}).get("active_program", "")
     if not program_file:
@@ -463,6 +650,8 @@ def load_active_program(config):
     active_prog = None
     active_prog_file = program_file
     auto_schedule = {}
+    series_next_due = None
+    sweep_schedule = {}
 
     try:
         with open(program_file, "r") as f:
@@ -498,9 +687,18 @@ def load_active_program(config):
         now_s = int(time.time())
         ref_epoch = prog["initial_startdate_epoch"]
         auto_schedule = {i: pantilt_program.next_occurrence(p, now_s, ref_epoch) for i, p in enumerate(prog["points"])}
+    elif prog.get("sweeps") is not None:
+        now_s = int(time.time())
+        sweep_schedule = {i: pantilt_program.next_occurrence(
+            {"repeated_minutes": s["repeat_minutes"], "offset_sec": 0}, now_s, s["initial_startdate_epoch"])
+            for i, s in enumerate(prog["sweeps"])}
 
     active_prog = prog
-    print(f"▶️ Program loaded: {program_file} ({prog['type']}, {len(prog['points'])} points)")
+    if prog.get("sweeps") is not None:
+        n_points = sum(len(s["points"]) for s in prog["sweeps"])
+        print(f"▶️ Program loaded: {program_file} ({prog['type']}, {len(prog['sweeps'])} sweeps, {n_points} points)")
+    else:
+        print(f"▶️ Program loaded: {program_file} ({prog['type']}, {len(prog['points'])} points)")
     return active_prog
 
 
@@ -524,13 +722,34 @@ def estimate_remaining_seconds(prog, index, pan_rel, tilt_rel, pantilt_cfg):
 def run_single_series_tick(config):
     #   Execute ONE point per main-loop pass, so pause/stop/disable are handled
     #   between points by the normal loop
+    global series_next_due
     pantilt_cfg = config.get("pantilt", {})
     prog = active_prog
     index = int(config.get("pantilt_status", {}).get("program_next_index", 0))
+    repeat_minutes = prog.get("repeat_minutes")
+
+    #   Between sweeps (repeat_minutes only): idle until the next grid slot,
+    #   same offset_sec=0 grid logic an automated point uses
+    if repeat_minutes and index == 0 and series_next_due is not None:
+        now_s = time.time()
+        live["next_measurement_utc"] = datetime.fromtimestamp(
+            series_next_due, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        live["next_measurement_in_s"] = max(0, int(series_next_due - now_s))
+        if now_s < series_next_due:
+            return
+        series_next_due = None
 
     if index >= len(prog["points"]):
-        print("✅ Single series finished")
-        clear_program()
+        if repeat_minutes:
+            ref_epoch = prog["initial_startdate_epoch"]
+            series_next_due = pantilt_program.next_occurrence(
+                {"repeated_minutes": repeat_minutes, "offset_sec": 0}, int(time.time()), ref_epoch)
+            update_yaml_flag("pantilt_status", "program_next_index", 0)
+            print(f"✅ Sweep finished, next sweep at "
+                  f"{datetime.fromtimestamp(series_next_due, tz=timezone.utc)} UTC")
+        else:
+            print("✅ Single series finished")
+            clear_program()
         return
 
     live["program_progress"] = f"{index + 1}/{len(prog['points'])}"
@@ -548,11 +767,78 @@ def run_single_series_tick(config):
 
     if result in ("done", "radar_unreachable"):
         update_yaml_flag("pantilt_status", "program_next_index", index + 1)
-        if index + 1 >= len(prog["points"]):
+        if index + 1 >= len(prog["points"]) and not repeat_minutes:
             print("✅ Single series finished")
             clear_program()
     elif result == "fault":
         pause_program(live["fault"] or f"Point {index + 1} failed")
+
+
+def run_multi_sweep_tick(config):
+    #   Independently-scheduled named sweeps (prog["sweeps"]); only one runs
+    #   at a time (one physical positioner). A sweep in progress always runs
+    #   to completion (one point per tick, same as run_single_series_tick)
+    #   before another sweep can start; idle ticks pick whichever due sweep
+    #   was declared earliest in the file when more than one is due at once,
+    #   and never skip a late sweep -- it just runs once it gets a turn.
+    global sweep_schedule
+    pantilt_cfg = config.get("pantilt", {})
+    prog = active_prog
+    sweeps = prog["sweeps"]
+    status_cfg = config.get("pantilt_status", {})
+    active_sweep = int(status_cfg.get("program_active_sweep", -1))
+    index = int(status_cfg.get("program_next_index", 0))
+    now_s = time.time()
+
+    if active_sweep >= 0:
+        sweep = sweeps[active_sweep]
+
+        if index >= len(sweep["points"]):
+            ref_epoch = sweep["initial_startdate_epoch"]
+            sweep_schedule[active_sweep] = pantilt_program.next_occurrence(
+                {"repeated_minutes": sweep["repeat_minutes"], "offset_sec": 0}, int(now_s), ref_epoch)
+            update_yaml_flags("pantilt_status", {"program_active_sweep": -1, "program_next_index": 0})
+            print(f"✅ Sweep '{sweep['name']}' finished, next at "
+                  f"{datetime.fromtimestamp(sweep_schedule[active_sweep], tz=timezone.utc)} UTC")
+            return
+
+        live["program_progress"] = f"{sweep['name']}: {index + 1}/{len(sweep['points'])}"
+        live["steps_done"] = index
+        live["steps_total"] = len(sweep["points"])
+        live["upcoming_points"] = [{"pan_rel": p["pan_deg"], "tilt_rel": p["tilt_deg"]}
+                                   for p in sweep["points"][index:index + 3]]
+        live["estimated_remaining_s"] = int(estimate_remaining_seconds(
+            {"points": sweep["points"]}, index, live["pan_rel"], live["tilt_rel"], pantilt_cfg))
+
+        result = run_point(sweep["points"][index], pantilt_cfg, prog["defaults"]["try"])
+
+        if result == "radar_unreachable":
+            print(f"⚠️ Sweep '{sweep['name']}' point {index + 1}: radar unreachable, skipping to the next point")
+
+        if result in ("done", "radar_unreachable"):
+            update_yaml_flag("pantilt_status", "program_next_index", index + 1)
+        elif result == "fault":
+            pause_program(live["fault"] or f"Sweep '{sweep['name']}' point {index + 1} failed")
+        return
+
+    #   Idle between sweeps: is any sweep due? Earliest due time wins; ties
+    #   (declared same instant) broken by lowest declared index (file order)
+    if not sweep_schedule:
+        return
+
+    due_index = min(sweep_schedule, key=lambda i: (sweep_schedule[i], i))
+    due = sweep_schedule[due_index]
+    live["program_progress"] = f"waiting — next: '{sweeps[due_index]['name']}'"
+    live["next_measurement_utc"] = datetime.fromtimestamp(due, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    live["next_measurement_in_s"] = max(0, int(due - now_s))
+    live["steps_done"] = 0
+    live["steps_total"] = 0
+
+    if now_s < due:
+        return
+
+    update_yaml_flags("pantilt_status", {"program_active_sweep": due_index, "program_next_index": 0})
+    print(f"▶️ Starting sweep '{sweeps[due_index]['name']}'")
 
 
 def run_automated_series_tick(config):
@@ -608,6 +894,9 @@ def process_commands(config):
     if pantilt_cfg.get("update", 0) == 1:
         update_yaml_flag("pantilt", "update", 0)
         apply_positioner_settings(pantilt_cfg)
+
+        if pantilt_cfg.get("keepout_profile", "") != _keepout_profile_loaded:
+            load_keepout(pantilt_cfg)
 
         if not target_allowed(live["pan_abs"], live["tilt_abs"], pantilt_cfg):
             set_fault("Current position is outside the new absolute limits — move back inside them")
@@ -724,7 +1013,8 @@ def start_program(program_file, config):
 
     set_fault("")
     update_yaml_flags("pantilt_status", {"active_program": program_file, "program_type": prog["type"],
-                                         "program_next_index": 0, "program_paused": 0})
+                                         "program_next_index": 0, "program_paused": 0,
+                                         "program_active_sweep": -1})
     return prog["type"]
 
 
@@ -758,6 +1048,8 @@ def main_loop():
     ensure_yaml_section("pantilt", PANTILT_DEFAULTS)
     ensure_yaml_section("pantilt_status", PANTILT_STATUS_DEFAULTS)
     update_yaml_flag("pantilt_status", "connected", 0)
+
+    load_keepout(retrieve_yaml_file().get("pantilt", {}))
 
     retry_started = time.time()
     next_retry = time.time()
@@ -793,7 +1085,10 @@ def main_loop():
             live["retry_in_s"] = max(0, int(next_retry - time.time()))
             if time.time() < next_retry:
                 continue
-            if not try_connect(config):
+            live["connecting"] = 1
+            connected_now = try_connect(config)
+            live["connecting"] = 0
+            if not connected_now:
                 interval = RETRY_FAST_S if time.time() - retry_started < RETRY_FAST_WINDOW_S else RETRY_SLOW_S
                 next_retry = time.time() + interval
                 print(f"🔎 Pan-tilt positioner not found, retrying in {interval} s")
@@ -812,7 +1107,10 @@ def main_loop():
                 prog = load_active_program(config)
                 if prog is not None:
                     if prog["type"] == "single":
-                        run_single_series_tick(config)
+                        if prog.get("sweeps") is not None:
+                            run_multi_sweep_tick(config)
+                        else:
+                            run_single_series_tick(config)
                     else:
                         run_automated_series_tick(config)
 

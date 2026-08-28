@@ -233,6 +233,7 @@
         <div id="pantiltAngles" style="display:none;">
             <div class="angles-rel">pan <span id="panRel">-</span>&deg; &nbsp; tilt <span id="tiltRel">-</span>&deg;<span id="movingIndicator"></span></div>
             <div class="angles-abs">absolute: pan <span id="panAbs">-</span>&deg; / tilt <span id="tiltAbs">-</span>&deg;</div>
+            <div class="angles-abs" id="homeLine">home: pan <span id="homePanAbs">-</span>&deg; / tilt <span id="homeTiltAbs">-</span>&deg; (absolute)</div>
         </div>
     </div>
 
@@ -259,7 +260,7 @@
                 <button type="button" onclick="stepPantilt(0, 1)">Tilt &#9650;</button>
                 <div></div>
                 <button type="button" onclick="stepPantilt(-1, 0)">&#9664; Pan</button>
-                <button type="button" onclick="goHomePantilt()">Home</button>
+                <button type="button" id="homeJogBtn" onclick="goHomePantilt()">Home</button>
                 <button type="button" onclick="stepPantilt(1, 0)">Pan &#9654;</button>
                 <div></div>
                 <button type="button" onclick="stepPantilt(0, -1)">Tilt &#9660;</button>
@@ -334,9 +335,33 @@
                     <input type="number" id="measure_timeout_seconds" min="60" max="1800" value="{{ config.get('pantilt', {}).get('measure_timeout_seconds', 400) }}">
                 </div>
                 <div class="form-group">
+                    <label for="pantilt_transport">Connection:</label>
+                    <select id="pantilt_transport" onchange="updateTransportFields()">
+                        <option value="serial" {% if config.get('pantilt', {}).get('transport', 'serial') == 'serial' %}selected{% endif %}>Serial (USB adapter)</option>
+                        <option value="ip" {% if config.get('pantilt', {}).get('transport', 'serial') == 'ip' %}selected{% endif %}>IP (Ethernet, Lantronix module)</option>
+                    </select>
+                </div>
+                <div class="form-group" id="pantilt_serial_fields">
                     <label for="pantilt_port">Serial port (empty = automatic scan):</label>
                     <input type="text" id="pantilt_port" value="{{ config.get('pantilt', {}).get('port', '') }}">
                 </div>
+                <div class="form-group" id="pantilt_ip_fields">
+                    <label for="pantilt_host">Positioner IP (Lantronix module):</label>
+                    <input type="text" id="pantilt_host" value="{{ config.get('pantilt', {}).get('host', '') }}">
+                    <label for="pantilt_tcp_port">Positioner TCP port:</label>
+                    <input type="number" id="pantilt_tcp_port" min="1" max="65535" value="{{ config.get('pantilt', {}).get('tcp_port', 10001) }}">
+                </div>
+                <script>
+                    //  Show only the fields for the selected connection type. Both
+                    //  sets are always submitted with save_config; only the one
+                    //  matching pantilt.transport is actually used by the daemon.
+                    function updateTransportFields() {
+                        const isIp = document.getElementById("pantilt_transport").value === "ip";
+                        document.getElementById("pantilt_serial_fields").style.display = isIp ? "none" : "";
+                        document.getElementById("pantilt_ip_fields").style.display = isIp ? "" : "none";
+                    }
+                    document.addEventListener("DOMContentLoaded", updateTransportFields);
+                </script>
                 <div class="form-group">
                     <label for="heater_config">Heater:</label>
                     <select id="heater_config">
@@ -345,6 +370,17 @@
                         <option value="3" {% if config.get('pantilt', {}).get('heater_config', 1) == 3 %}selected{% endif %}>Full heat (concurrent with motion)</option>
                     </select>
                     <div id="heaterStateLine" class="grey-note"></div>
+                </div>
+                <div class="form-group">
+                    <label for="keepout_profile">Keep-out profile (antenna/mount geometry):</label>
+                    <select id="keepout_profile">
+                        <option value="">-- none (unrestricted) --</option>
+                        {% for p in keepout_profiles %}
+                        <option value="{{ p }}" {% if config.get('pantilt', {}).get('keepout_profile', '') == p %}selected{% endif %}>{{ p }}</option>
+                        {% endfor %}
+                    </select>
+                    <div id="keepoutStateLine" class="grey-note"></div>
+                    <button type="button" onclick="openKeepoutEditor()" style="margin-top:5px;">Open keep-out editor&hellip;</button>
                 </div>
                 <button type="button" onclick="submitPantiltSettings()">Submit</button>
             </form>
@@ -402,6 +438,7 @@
         let pantiltEnabled = parseInt("{{ config.get('pantilt', {}).get('enabled', 0) }}", 10) === 1;
         let pantiltLive = {};      // last /get_pantilt_vars response
         let pantiltMoving = false;
+        let pantiltMeasuring = false;
         let programText = null;    // uploaded program file contents
         let lastPreviewResult = null;  // last /pantilt/preview_program response, for the Run confirmation
         let pantiltCfg = {
@@ -419,18 +456,34 @@
             pollPantiltStatus();
             updatePantiltToggleButton();
             updateRelLimitsLine();
+            updateHomeLine();
             refreshProgramDropdown();
         };
+
+        //  Home position readout (upper card, below the absolute angle) + the
+        //  Home jog button's hover tooltip -- both fed from pantiltCfg, which
+        //  is refreshed by refreshPantiltConfig() (e.g. after Set Home).
+        function updateHomeLine() {
+            const pan = pantiltCfg.home_pan_abs.toFixed(1);
+            const tilt = pantiltCfg.home_tilt_abs.toFixed(1);
+            document.getElementById("homePanAbs").textContent = pan;
+            document.getElementById("homeTiltAbs").textContent = tilt;
+            document.getElementById("homeJogBtn").title = "Go to home: pan " + pan + "° / tilt " + tilt + "° (absolute)";
+        }
 
         function pollPantiltStatus() {
             getPantiltVars();
             setTimeout(pollPantiltStatus, 1000);
         }
 
-        //  Header border/background reflects whether pan-tilt is moving
+        //  Header border/background reflects whether pan-tilt is measuring (red,
+        //  same color as the radar dashboard's header during a VNA sweep) or moving
         function updateHeaderState() {
             const header = document.querySelector('.header');
-            if (pantiltMoving) {
+            if (pantiltMeasuring) {
+                header.style.borderBottom = "3px solid #FF5733";
+                header.style.backgroundColor = "#946161";
+            } else if (pantiltMoving) {
                 header.style.borderBottom = "3px solid #3f7fd6";
                 header.style.backgroundColor = "#243f5e";
             } else {
@@ -526,16 +579,21 @@
                 programCard.style.display = "none";
                 faultContainer.style.display = "none";
                 pantiltMoving = false;
+                pantiltMeasuring = false;
                 updateHeaderState();
                 return;
             }
 
             const connected = data.connected === 1;
             pantiltMoving = connected && data.moving === 1;
+            pantiltMeasuring = connected && data.measuring === 1;
             updateHeaderState();
             if (connected) {
                 statusLine.textContent = "Connection OK (" + data.port + ")";
                 statusLine.style.color = "#017701";
+            } else if (data.connecting === 1) {
+                statusLine.textContent = "Connecting…";
+                statusLine.style.color = "#b8860b";
             } else {
                 statusLine.textContent = "Connection failure — retry in " + data.retry_in_s + " s";
                 statusLine.style.color = "#b30000";
@@ -555,6 +613,10 @@
             const heaterNames = {1: "Off", 2: "Sharing power with motors", 3: "Full heat"};
             document.getElementById("heaterStateLine").textContent =
                 connected ? "Confirmed: " + (heaterNames[data.heater_state] || "unknown") : "";
+
+            document.getElementById("keepoutStateLine").textContent = data.keepout_profile
+                ? data.keepout_breakpoints + " breakpoint(s) loaded"
+                : "No profile selected — moves are unrestricted by antenna geometry";
 
             //  Single-measurement button: red + disabled while the daemon is
             //  blocked inside measure() (can take up to measure_timeout_seconds)
@@ -619,6 +681,14 @@
                         stepsTable.style.display = "none";
                         stepsBody.innerHTML = "";
                     }
+                } else if (data.program_type === "single" && data.next_measurement_utc) {
+                    //  Idle between sweeps (single+repeat_minutes, or between sweeps in a
+                    //  multi-sweep program): steps_total is 0 while waiting for the next slot
+                    nextMeasurementBox.style.display = "none";
+                    stepsTable.style.display = "none";
+                    stepsBody.innerHTML = "";
+                    nextLine = "Waiting — next sweep due in " + formatHMS(data.next_measurement_in_s) +
+                               " (" + data.next_measurement_utc + " UTC)";
                 } else {
                     nextMeasurementBox.style.display = "none";
                     stepsTable.style.display = "none";
@@ -677,6 +747,7 @@
                         if (pantilt[key] !== undefined) pantiltCfg[key] = parseInt(pantilt[key], 10);
                     });
                     updateRelLimitsLine();
+                    updateHomeLine();
                 })
                 .catch(error => console.error('Error refreshing pan-tilt config:', error));
         }
@@ -738,6 +809,15 @@
             postPantilt({ clear_fault: 1 });
         }
 
+        //  Opens the keep-out envelope editor (visualize + jog + record/build
+        //  profile files) in its own window, preselected to whichever profile
+        //  is picked in the dropdown right now (falls back to the active one).
+        function openKeepoutEditor() {
+            const sel = document.getElementById("keepout_profile").value;
+            const url = "/pantilt/keepout" + (sel ? "?profile=" + encodeURIComponent(sel) : "");
+            window.open(url, "keepoutEditor", "width=1180,height=820");
+        }
+
         //  Advanced settings
         function submitPantiltSettings() {
             const panMin = parseFloat(document.getElementById("pan_min_abs").value);
@@ -779,8 +859,12 @@
                     min_gap_seconds: parseInt(document.getElementById("min_gap_seconds").value),
                     move_timeout_seconds: parseInt(document.getElementById("move_timeout_seconds").value),
                     measure_timeout_seconds: parseInt(document.getElementById("measure_timeout_seconds").value),
+                    transport: document.getElementById("pantilt_transport").value,
                     port: document.getElementById("pantilt_port").value,
+                    host: document.getElementById("pantilt_host").value,
+                    tcp_port: parseInt(document.getElementById("pantilt_tcp_port").value),
                     heater_config: parseInt(document.getElementById("heater_config").value),
+                    keepout_profile: document.getElementById("keepout_profile").value,
 
                     update: 1
                 }
@@ -898,10 +982,15 @@
             }
 
             const s = result.summary;
-            let line = "<strong>" + escapeHtml(s.name) + "</strong> — " + s.type + ", " + s.n_points + " points, " + s.tries + " tries per point";
-            if (s.estimated_minutes !== undefined) line += ", estimated duration ~" + s.estimated_minutes + " min";
-            if (s.measurements_per_hour !== undefined) line += ", " + s.measurements_per_hour + " measurements/hour";
-            if (s.initial_startdate_pantilt) line += ", anchored at " + s.initial_startdate_pantilt + " UTC";
+            let line = "<strong>" + escapeHtml(s.name) + "</strong> — " + s.type;
+            if (s.sweeps) {
+                line += ", " + s.n_sweeps + " sweeps, " + s.n_points + " points total, " + s.tries + " tries per point";
+            } else {
+                line += ", " + s.n_points + " points, " + s.tries + " tries per point";
+                if (s.estimated_minutes !== undefined) line += ", estimated duration ~" + s.estimated_minutes + " min";
+                if (s.measurements_per_hour !== undefined) line += ", " + s.measurements_per_hour + " measurements/hour";
+                if (s.initial_startdate_pantilt) line += ", anchored at " + s.initial_startdate_pantilt + " UTC";
+            }
             if (!result.valid) line += " — <span style='color:#b30000;'>INVALID</span>";
 
             //  Recorded setup this program expects (if declared) — same for single/automated
@@ -915,23 +1004,55 @@
                 if (s.tilt_orientation !== undefined) parts.push("tilt orientation " + s.tilt_orientation);
                 line += parts.join(", ") + "</span>";
             }
+            if (s.sweeps) {
+                line += "<table style='margin-top:6px;'><tr><th>sweep</th><th>points</th><th>every</th>" +
+                        "<th>est. duration</th><th>anchored at</th></tr>";
+                s.sweeps.forEach(sw => {
+                    line += "<tr><td>" + escapeHtml(sw.name) + "</td><td>" + sw.n_points + "</td><td>" +
+                            sw.repeat_minutes + " min</td><td>~" + sw.estimated_minutes + " min</td><td>" +
+                            sw.initial_startdate_pantilt + " UTC</td></tr>";
+                });
+                line += "</table>";
+            }
             summary.innerHTML = line;
 
-            //  Per-point table: red rows outside limits, orange close to a limit
+            //  Per-point table: red rows outside limits, orange close to a limit.
+            //  Sweep programs group rows under a sub-header per sweep instead of
+            //  the automated-only every/offset columns (sweeps don't have those).
             const automated = s.type === "automated";
-            let html = "<table><tr><th>#</th><th>pan (°)</th><th>tilt (°)</th>";
-            if (automated) html += "<th>every (min)</th><th>offset (s)</th>";
-            html += "<th>check</th></tr>";
-            result.points.forEach(p => {
-                html += "<tr class='point-" + p.status + "'><td>" + (p.index + 1) + "</td><td>" + p.pan_deg + "</td><td>" + p.tilt_deg + "</td>";
-                if (automated) html += "<td>" + p.repeated_minutes + "</td><td>" + p.offset_sec + "</td>";
-                html += "<td>" + escapeHtml(p.message || "ok") + "</td></tr>";
-            });
-            html += "</table>";
+            const hasSweeps = result.points.length && result.points[0].sweep_name !== undefined;
+            let html = "";
+            if (hasSweeps) {
+                let currentSweep = null;
+                result.points.forEach(p => {
+                    if (p.sweep_name !== currentSweep) {
+                        if (currentSweep !== null) html += "</table>";
+                        html += "<p style='margin:8px 0 2px; font-weight:bold;'>" + escapeHtml(p.sweep_name) + "</p>";
+                        html += "<table><tr><th>#</th><th>pan (°)</th><th>tilt (°)</th><th>check</th></tr>";
+                        currentSweep = p.sweep_name;
+                    }
+                    html += "<tr class='point-" + p.status + "'><td>" + (p.index + 1) + "</td><td>" + p.pan_deg +
+                            "</td><td>" + p.tilt_deg + "</td><td>" + escapeHtml(p.message || "ok") + "</td></tr>";
+                });
+                if (currentSweep !== null) html += "</table>";
+            } else {
+                html = "<table><tr><th>#</th><th>pan (°)</th><th>tilt (°)</th>";
+                if (automated) html += "<th>every (min)</th><th>offset (s)</th>";
+                html += "<th>check</th></tr>";
+                result.points.forEach(p => {
+                    html += "<tr class='point-" + p.status + "'><td>" + (p.index + 1) + "</td><td>" + p.pan_deg + "</td><td>" + p.tilt_deg + "</td>";
+                    if (automated) html += "<td>" + p.repeated_minutes + "</td><td>" + p.offset_sec + "</td>";
+                    html += "<td>" + escapeHtml(p.message || "ok") + "</td></tr>";
+                });
+                html += "</table>";
+            }
 
             if (result.timeline && result.timeline.length) {
                 html += "<p style='color:#333; font-size:13px; text-align:left;'>First measurements (UTC): " +
-                        result.timeline.slice(0, 5).map(t => t.utc + " (point " + (t.point + 1) + ")").join("; ") + " …</p>";
+                        result.timeline.slice(0, 5).map(t =>
+                            t.sweep_name !== undefined ? t.utc + " (" + escapeHtml(t.sweep_name) + ")"
+                                                        : t.utc + " (point " + (t.point + 1) + ")"
+                        ).join("; ") + " …</p>";
             }
             details.innerHTML = html;
 
@@ -939,6 +1060,11 @@
             if (result.home_warnings && result.home_warnings.length) {
                 if (conflictsHtml) conflictsHtml += "<br>";
                 conflictsHtml += result.home_warnings.map(w => "⚠️ " + escapeHtml(w)).join("<br>");
+            }
+            if (s.sweep_conflicts && s.sweep_conflicts.length) {
+                //  Informational only (duration is an estimate) — doesn't gate runBtn
+                if (conflictsHtml) conflictsHtml += "<br>";
+                conflictsHtml += s.sweep_conflicts.map(c => "ℹ️ " + escapeHtml(c.message)).join("<br>");
             }
             conflicts.innerHTML = conflictsHtml;
             runBtn.disabled = !result.valid;

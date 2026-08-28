@@ -32,6 +32,7 @@ pantilt:
   resume_program: 0
   stop_program: 0
   heater_config: 1
+  keepout_profile: ''
 pantilt_status:
   connected: 0
   pan_rel: 0.0

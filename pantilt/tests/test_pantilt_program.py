@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.pantilt_program import (ProgramError, load_program, relative_limits,
                                  validate_points, validate_schedule, pair_min_gap,
-                                 next_occurrence, summarize, preview,
+                                 next_occurrence, summarize, preview, upcoming_sweeps,
                                  home_orientation_warnings, home_orientation_overrides,
                                  backfill_recorded_setup, dump_program)
 
@@ -49,6 +49,29 @@ points:
     tilt_deg: 0
     repeated_minutes: 60
     offset_sec: 120
+"""
+
+#   Two independently-scheduled sweeps: hourly (anchored on the hour) and
+#   daily (anchored 3h07 later, so its grid never exactly coincides with the
+#   hourly one -- see test_sweeps for what happens when it does)
+SWEEPS = """
+schema_version: 1
+type: single
+defaults:
+  try: 2
+sweeps:
+  - name: hourly
+    initial_startdate_pantilt: '2026-08-21 00:00:00'
+    repeat_minutes: 60
+    points:
+      - {pan_deg: 0, tilt_deg: 0}
+      - {pan_deg: 5, tilt_deg: 0}
+  - name: daily
+    initial_startdate_pantilt: '2026-08-21 03:07:00'
+    repeat_minutes: 1440
+    points:
+      - {pan_deg: -10, tilt_deg: 0}
+      - {pan_deg: 10, tilt_deg: 0}
 """
 
 
@@ -258,6 +281,218 @@ points:
     assert "initial_startdate_epoch" not in text  # internal/derived field is not persisted
 
 
+def test_repeat_minutes():
+    #   Plain single: repeat_minutes is absent, not just falsy
+    plain = load_program(SINGLE)
+    assert plain.get("repeat_minutes") is None
+    assert "repeat_minutes" not in dump_program(plain)
+
+    #   single + repeat_minutes needs initial_startdate_pantilt, same as automated
+    expect_error("""
+schema_version: 1
+type: single
+repeat_minutes: 30
+defaults: {try: 1}
+points: [{pan_deg: 0, tilt_deg: 0}]
+""", "initial_startdate_pantilt")
+
+    #   repeat_minutes must be a positive int
+    expect_error("""
+schema_version: 1
+type: single
+repeat_minutes: 0
+initial_startdate_pantilt: '2025-04-07 12:00:00'
+defaults: {try: 1}
+points: [{pan_deg: 0, tilt_deg: 0}]
+""", "repeat_minutes must be an integer")
+
+    #   automated ignores a stray repeat_minutes key rather than misparsing it
+    auto = load_program(AUTOMATED + "repeat_minutes: 15\n")
+    assert auto.get("repeat_minutes") is None
+
+    #   Valid case, and it round-trips through dump/load unchanged
+    repeating = load_program("""
+schema_version: 1
+type: single
+repeat_minutes: 30
+initial_startdate_pantilt: '2025-04-07 12:00:00'
+defaults: {try: 1}
+points:
+  - {pan_deg: 0, tilt_deg: 0}
+  - {pan_deg: 5, tilt_deg: 0}
+""")
+    assert repeating["repeat_minutes"] == 30
+    assert repeating["initial_startdate_epoch"] == 1744027200
+
+    #   The whole sweep is scheduled like a single automated point (offset_sec=0)
+    synthetic = {"repeated_minutes": repeating["repeat_minutes"], "offset_sec": 0}
+    ref_epoch = repeating["initial_startdate_epoch"]
+    due = next_occurrence(synthetic, ref_epoch + 10 * 60, ref_epoch)   # 10 min after start
+    assert due == ref_epoch + 30 * 60   # next sweep starts at the 30-min mark, not 10+30
+
+    reloaded = load_program(dump_program(repeating))
+    assert reloaded["repeat_minutes"] == 30
+
+    #   summarize() warns if one sweep wouldn't fit inside its own repeat interval:
+    #   two points at ~37s each (settle + MEASURE_SECONDS_ESTIMATE) is >1 minute
+    tight = load_program("""
+schema_version: 1
+type: single
+repeat_minutes: 1
+initial_startdate_pantilt: '2025-04-07 12:00:00'
+defaults: {try: 1}
+points:
+  - {pan_deg: 0, tilt_deg: 0}
+  - {pan_deg: 5, tilt_deg: 0}
+""")
+    summary = summarize(tight, PANTILT_CFG)
+    assert summary["repeat_minutes"] == 1
+    assert any("exceeds repeat_minutes" in w for w in summary.get("warnings", []))
+
+    #   ...and doesn't warn when it comfortably fits
+    summary = summarize(repeating, PANTILT_CFG)
+    assert summary["repeat_minutes"] == 30
+    assert "warnings" not in summary or not summary["warnings"]
+
+
+def test_sweeps():
+    prog = load_program(SWEEPS)
+    assert prog["type"] == "single"
+    assert "points" not in prog
+    assert len(prog["sweeps"]) == 2
+    assert prog["sweeps"][0]["name"] == "hourly" and prog["sweeps"][0]["repeat_minutes"] == 60
+    assert prog["sweeps"][1]["name"] == "daily" and prog["sweeps"][1]["repeat_minutes"] == 1440
+    assert len(prog["sweeps"][0]["points"]) == 2 and len(prog["sweeps"][1]["points"]) == 2
+    assert prog["sweeps"][0]["initial_startdate_epoch"] < prog["sweeps"][1]["initial_startdate_epoch"]
+
+    #   'sweeps' is single-only
+    expect_error("""
+schema_version: 1
+type: automated
+sweeps:
+  - {name: a, repeat_minutes: 1, initial_startdate_pantilt: '2025-01-01 00:00:00', points: [{pan_deg: 0, tilt_deg: 0}]}
+  - {name: b, repeat_minutes: 1, initial_startdate_pantilt: '2025-01-01 00:00:00', points: [{pan_deg: 0, tilt_deg: 0}]}
+""", "sweeps")
+
+    #   Can't mix 'sweeps' with a top-level 'points'
+    expect_error("""
+schema_version: 1
+type: single
+points: [{pan_deg: 0, tilt_deg: 0}]
+sweeps:
+  - {name: a, repeat_minutes: 1, initial_startdate_pantilt: '2025-01-01 00:00:00', points: [{pan_deg: 0, tilt_deg: 0}]}
+  - {name: b, repeat_minutes: 1, initial_startdate_pantilt: '2025-01-01 00:00:00', points: [{pan_deg: 0, tilt_deg: 0}]}
+""", "not both")
+
+    #   Can't mix 'sweeps' with a top-level repeat_minutes/initial_startdate_pantilt
+    expect_error("""
+schema_version: 1
+type: single
+repeat_minutes: 30
+initial_startdate_pantilt: '2025-01-01 00:00:00'
+sweeps:
+  - {name: a, repeat_minutes: 1, initial_startdate_pantilt: '2025-01-01 00:00:00', points: [{pan_deg: 0, tilt_deg: 0}]}
+  - {name: b, repeat_minutes: 1, initial_startdate_pantilt: '2025-01-01 00:00:00', points: [{pan_deg: 0, tilt_deg: 0}]}
+""", "per-sweep")
+
+    #   A single-entry 'sweeps' list is valid (equivalent to plain 'points:',
+    #   but keeps the sweeps: shape -- e.g. when trimming a sweep out of a
+    #   larger multi-sweep file without rewriting it)
+    solo = load_program("""
+schema_version: 1
+type: single
+sweeps:
+  - {name: a, repeat_minutes: 1, initial_startdate_pantilt: '2025-01-01 00:00:00', points: [{pan_deg: 0, tilt_deg: 0}]}
+""")
+    assert len(solo["sweeps"]) == 1 and solo["sweeps"][0]["name"] == "a"
+
+    #   Empty 'sweeps' list is still rejected
+    expect_error("""
+schema_version: 1
+type: single
+sweeps: []
+""", "non-empty")
+
+    #   Duplicate sweep names rejected
+    expect_error("""
+schema_version: 1
+type: single
+sweeps:
+  - {name: a, repeat_minutes: 1, initial_startdate_pantilt: '2025-01-01 00:00:00', points: [{pan_deg: 0, tilt_deg: 0}]}
+  - {name: a, repeat_minutes: 2, initial_startdate_pantilt: '2025-01-01 00:00:00', points: [{pan_deg: 0, tilt_deg: 0}]}
+""", "used more than once")
+
+    #   Each sweep needs its own repeat_minutes >= 1...
+    expect_error("""
+schema_version: 1
+type: single
+sweeps:
+  - {name: a, initial_startdate_pantilt: '2025-01-01 00:00:00', points: [{pan_deg: 0, tilt_deg: 0}]}
+  - {name: b, repeat_minutes: 1, initial_startdate_pantilt: '2025-01-01 00:00:00', points: [{pan_deg: 0, tilt_deg: 0}]}
+""", "repeat_minutes")
+
+    #   ...and its own initial_startdate_pantilt
+    expect_error("""
+schema_version: 1
+type: single
+sweeps:
+  - {name: a, repeat_minutes: 1, points: [{pan_deg: 0, tilt_deg: 0}]}
+  - {name: b, repeat_minutes: 1, initial_startdate_pantilt: '2025-01-01 00:00:00', points: [{pan_deg: 0, tilt_deg: 0}]}
+""", "initial_startdate_pantilt")
+
+    #   summarize(): per-sweep breakdown; the two grids here don't come close
+    #   enough to overlap given how short each sweep is
+    summary = summarize(prog, PANTILT_CFG)
+    assert summary["n_sweeps"] == 2 and summary["n_points"] == 4
+    assert [sw["name"] for sw in summary["sweeps"]] == ["hourly", "daily"]
+    assert summary["sweeps"][0]["repeat_minutes"] == 60
+    assert not any(sw.get("warnings") for sw in summary["sweeps"])
+    assert summary["sweep_conflicts"] == []
+
+    #   validate_points()/preview() tag each point with its sweep
+    reports = validate_points(prog, PANTILT_CFG)
+    assert len(reports) == 4
+    assert reports[0]["sweep_name"] == "hourly" and reports[2]["sweep_name"] == "daily"
+
+    result = preview(SWEEPS, PANTILT_CFG)
+    assert result["valid"] and len(result["timeline"]) > 0
+    assert all("sweep_name" in t for t in result["timeline"])
+
+    #   validate_schedule() stays automated-only: sweeps never produce a hard conflict
+    assert validate_schedule(prog, PANTILT_CFG) == []
+
+    #   Round-trips through dump/load; per-sweep epoch is stripped, not persisted
+    text = dump_program(prog)
+    assert "initial_startdate_epoch" not in text
+    reloaded = load_program(text)
+    assert len(reloaded["sweeps"]) == 2 and reloaded["sweeps"][0]["name"] == "hourly"
+
+    #   upcoming_sweeps(): each sweep fires on its own grid, timeline tags the name
+    ref = prog["sweeps"][0]["initial_startdate_epoch"]
+    events = upcoming_sweeps(prog, ref, horizon_s=3600)
+    assert events[0]["sweep_name"] == "hourly"
+
+    #   Two sweeps whose combined estimated duration exceeds the gap between
+    #   their scheduled starts -> soft sweep_conflicts warning (not a hard error)
+    tight = load_program("""
+schema_version: 1
+type: single
+sweeps:
+  - name: fast-a
+    initial_startdate_pantilt: '2025-01-01 00:00:00'
+    repeat_minutes: 1
+    points: [{pan_deg: 0, tilt_deg: 0}, {pan_deg: 5, tilt_deg: 0}]
+  - name: fast-b
+    initial_startdate_pantilt: '2025-01-01 00:00:30'
+    repeat_minutes: 1
+    points: [{pan_deg: 0, tilt_deg: 0}, {pan_deg: 5, tilt_deg: 0}]
+""")
+    tight_summary = summarize(tight, PANTILT_CFG)
+    assert len(tight_summary["sweep_conflicts"]) == 1
+    tight_result = preview(dump_program(tight), PANTILT_CFG)
+    assert tight_result["valid"]   # soft warning only -- doesn't block the run
+
+
 if __name__ == "__main__":
     test_load_program()
     test_relative_limits()
@@ -267,4 +502,6 @@ if __name__ == "__main__":
     test_next_occurrence()
     test_summarize_and_preview()
     test_recorded_setup()
+    test_repeat_minutes()
+    test_sweeps()
     print("✅ All pantilt program tests passed")
